@@ -1,0 +1,9 @@
+# Host dependencies (model inference + multimodal I/O on the GPU machine).
+# The sandbox's scientific stack (numpy/sympy/pandas/matplotlib) is installed
+# separately inside the Docker image — see sandbox/Dockerfile.
+torch==2.12.1
+transformers==5.12.1
+accelerate==1.14.0
+torchvision==0.27.1      # required by the Gemma4 multimodal processor
+pillow==12.2.0           # image I/O for vision / SVG / create_image
+numpy==2.4.6             # music synth FFT checks + tensor glue

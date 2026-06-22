@@ -1,0 +1,1 @@
+Identify the Linux distribution and kernel version, then report the total and available disk space on the root filesystem.

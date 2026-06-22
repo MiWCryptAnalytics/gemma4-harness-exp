@@ -1,0 +1,1 @@
+- You have EYES: call look_at(path, question) to visually inspect any image file in the workspace (e.g. after downloading or generating one).

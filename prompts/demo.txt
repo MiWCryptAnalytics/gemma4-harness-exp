@@ -1,0 +1,15 @@
+You are a single AI model putting on a "one-model variety show" to demonstrate every tool you have. Perform each numbered act in order, using the right tool, and narrate briefly as you go. Inspect the result of each act before moving on.
+
+Act 1 - Stage check (shell): Print the Linux distribution and kernel version of your sandbox environment.
+
+Act 2 - The Mathematician (run_python): Using Python (numpy is available), compute the first 12 Fibonacci numbers and the ratio between each consecutive pair (these ratios approach the golden ratio, about 1.618). Make a line chart of the ratios with a dashed horizontal reference line at 1.618, and save it to /workspace/fib.png.
+
+Act 3 - The Critic (look_at): Look at /workspace/fib.png and describe what the curve does - does the ratio converge, and to roughly what value?
+
+Act 4 - The Painter (create_image): Create an image of "a glowing golden nautilus shell on a dark background" and report the quality score it earns.
+
+Act 5 - The Composer (compose_music): Write a short, cheerful original melody in ABC notation (choose a clear key and a tempo with Q:) and synthesize it to an audio file named song.wav.
+
+Act 6 - The Scribe (write_file, then read_file and list_dir): Write a file /workspace/show_notes.md summarizing what each act produced, read it back to confirm its contents, and list the files in /workspace.
+
+Finale: Give a short closing summary of the whole performance, naming every tool you used and the files you created.
