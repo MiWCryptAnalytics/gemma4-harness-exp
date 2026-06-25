@@ -47,6 +47,7 @@ test:  ## Run all no-GPU correctness tests
 	$(PY) test_music.py
 	$(PY) test_vision_tool.py
 	$(PY) test_image_agent.py
+	$(PY) test_export.py
 
 dry-run:  ## Replay a recorded native workflow (no GPU)
 	$(GEMMA) --dry-run --workflow datawrangle

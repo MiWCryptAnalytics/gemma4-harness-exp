@@ -13,6 +13,7 @@ stops at <tool_call|> (a call to execute) or <turn|> (a final answer).
 
 import argparse
 import os
+import sys
 import time
 
 import instrument
@@ -168,12 +169,18 @@ def main():
                         help="Read the task from a file (real-model mode).")
     parser.add_argument("--system-file", default=None,
                         help="System-rules file (default: prompts/system.txt).")
+    parser.add_argument("--system-prompt-file", default=None,
+                        help="System prompt under evaluation; alias of --system-file "
+                             "(the tuning target an external eval driver injects).")
     parser.add_argument("--max-steps", type=int, default=8,
                         help="Max tool-call rounds before giving up.")
     parser.add_argument("--exec-timeout", type=int, default=60,
                         help="Per-command timeout (s) inside the sandbox; raise for compiles.")
     parser.add_argument("--exec-workspace", action="store_true",
                         help="Allow executing files from the workspace (needed to build/run compiled code).")
+    parser.add_argument("--workspace", default=None,
+                        help="Host directory to export the sandbox /workspace into after the run "
+                             "(so an external eval driver can grade the artifacts).")
     parser.add_argument("--vision", action="store_true",
                         help="Give the agent eyes: load the unified model and the look_at tool.")
     parser.add_argument("--debug", action="store_true",
@@ -205,7 +212,8 @@ def main():
 
         # Prompts live in external text files so they can be iterated on without
         # touching the code (see prompts/).
-        system_rules = open(args.system_file or load_prompt_path("system.txt")).read().strip()
+        system_file = args.system_prompt_file or args.system_file or load_prompt_path("system.txt")
+        system_rules = open(system_file).read().strip()
         if args.vision:
             system_rules += "\n" + open(load_prompt_path("system_vision.txt")).read().strip()
         if args.task_file:
@@ -213,15 +221,27 @@ def main():
         else:
             task = args.task or open(load_prompt_path("default_task.txt")).read().strip()
 
+    answer = None
     with Sandbox(network=args.network, exec_timeout=args.exec_timeout,
-                 exec_workspace=args.exec_workspace):
-        run_agent(system_rules, task, engine, max_steps=args.max_steps,
-                  enable_thinking=args.think)
+                 exec_workspace=args.exec_workspace) as sb:
+        try:
+            answer = run_agent(system_rules, task, engine, max_steps=args.max_steps,
+                               enable_thinking=args.think)
+        finally:
+            # Export artifacts even if the run errored or hit max_steps, so an
+            # external grader still sees whatever the agent managed to produce.
+            if args.workspace:
+                sb.export_workspace(args.workspace)
+                note(f"workspace exported to {args.workspace}")
 
     engine_kind = "mock" if args.dry_run else ("unified" if args.vision else "text")
     model_label = "mock" if args.dry_run else model_id
     path = METRICS.log_run(model=model_label, engine=engine_kind)
     note(f"metrics written to {path}")
+
+    # Exit code is the eval contract's success signal: 0 iff the agent reached a
+    # final answer; non-zero on max_steps (answer is None) so `exit_zero` checks bite.
+    sys.exit(0 if answer is not None else 1)
 
 
 if __name__ == "__main__":

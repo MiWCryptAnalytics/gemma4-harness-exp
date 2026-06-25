@@ -171,3 +171,37 @@ class Sandbox:
             raise RuntimeError(f"read_bytes failed: {r.stderr.strip()}")
         import base64
         return base64.b64decode(r.stdout)
+
+    def export_workspace(self, host_dir):
+        """Copy everything under /workspace out to a host directory.
+
+        Same constraint as read_bytes: /workspace is a tmpfs mount that
+        `docker cp` can't read, but an exec'd process inside the namespace can.
+        So we tar the tree to stdout (`tar c -C /workspace .`), base64 it across
+        the exec boundary, and untar it on the host. An empty workspace yields an
+        empty (but created) host_dir rather than an error — a run that wrote no
+        files is a valid, gradeable outcome.
+
+        Returns the host Path written to.
+        """
+        if self.container_id is None:
+            raise RuntimeError("Sandbox is not running.")
+        host_dir = Path(host_dir)
+        host_dir.mkdir(parents=True, exist_ok=True)
+        # tar's exit code is non-zero if /workspace vanished; an empty dir tars fine.
+        r = subprocess.run(
+            ["docker", "exec", "--user", "1000:1000", self.container_id,
+             "sh", "-c", "tar c -C /workspace . | base64"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0:
+            raise RuntimeError(f"export_workspace failed: {r.stderr.strip()}")
+        import base64
+        tar_bytes = base64.b64decode(r.stdout)
+        if not tar_bytes:
+            return host_dir
+        import io
+        import tarfile
+        with tarfile.open(fileobj=io.BytesIO(tar_bytes), mode="r:") as tf:
+            tf.extractall(host_dir)
+        return host_dir

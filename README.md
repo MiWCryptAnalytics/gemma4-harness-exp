@@ -98,7 +98,7 @@ Or drive `gemma4.py` directly:
 
 Useful flags: `--vision` (eyes + draw), `--network`, `--exec-workspace` (run
 compiled binaries), `--exec-timeout`, `--max-steps`, `--task`/`--task-file`,
-`--system-file`, `--debug`, `--dry-run`.
+`--system-file`/`--system-prompt-file`, `--workspace`, `--debug`, `--dry-run`.
 
 ### Prompts
 
@@ -127,6 +127,27 @@ throughput by type, tool time, wall clock), and writes a
 `metrics/<timestamp>_<model>.json` for cross-run comparison. Set a different
 model with `GEMMA_MODEL_ID=…` to compare (note: the tool grammar is tuned to
 Gemma 4, so other models may need template tweaks).
+
+## Evaluation harness
+
+The instrumentation above measures *speed*; a separate tool measures *task
+success*. The harness exposes a small contract so an external eval driver — the
+companion [`Gemma4-evals`](../Gemma4-evals) project — can run a suite of agentic
+tasks against it and grade what the agent actually produced:
+
+- `--workspace <hostdir>` — after the run, the sandbox's tmpfs `/workspace` is
+  exported (tar-over-`docker exec`, same trick as binary reads) to this host
+  directory, so file/shell checks and an LLM vision-judge can inspect artifacts
+  like `chart.png`. Export happens even if the run errors or hits `--max-steps`.
+- `--system-prompt-file <file>` — the system prompt under evaluation (alias of
+  `--system-file`); this is the prompt-tuning target the driver injects.
+- **Exit code** — `0` when the agent reached a final answer, non-zero when it hit
+  `--max-steps` or crashed, so the eval's `exit_zero` check is meaningful.
+
+The eval driver shells out per its own `harness.yaml`; point that file's
+`command` at this `gemma4.py` (absolute path — the driver runs each task in its
+own working directory, and the harness is cwd-independent). The grader and task
+suite live in `Gemma4-evals`.
 
 ## Repository layout
 
