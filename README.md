@@ -247,7 +247,7 @@ Gemma 4, so other models may need template tweaks).
 
 The instrumentation above measures *speed*; a separate tool measures *task
 success*. The harness exposes a small contract so an external eval driver — the
-companion [`Gemma4-evals`](../Gemma4-evals) project — can run a suite of agentic
+companion [`Gemma4-evals`](https://github.com/MiWCryptAnalytics/Gemma4-evals) project — can run a suite of agentic
 tasks against it and grade what the agent actually produced:
 
 - `--workspace <hostdir>` — after the run, the sandbox's tmpfs `/workspace` is
