@@ -22,20 +22,55 @@ from tokens import TOOL_CALL_CLOSE, TURN_CLOSE
 MODEL_ID = os.environ.get("GEMMA_MODEL_ID", "google/gemma-4-12b-it")
 
 
+def model_load_kwargs(quantize=None):
+    """from_pretrained kwargs shared by every model loader in the harness.
+
+    quantize=None (the default) loads full bf16. On a 24GB card the 12B's
+    weights (~23GB) don't fit next to the KV cache, so device_map="auto"
+    offloads some layers to CPU and generation is slow (~2 tok/s) — but output
+    fidelity is maximal. That default is deliberate: at 4-bit the model often
+    emits malformed SVG/XML, which breaks the structured-output tool workflows
+    (svg_studio, create_image), so reduced precision is strictly opt-in:
+
+      '8bit' — int8, ~13GB, fits a 24GB card fully on-GPU; mild fidelity loss.
+      '4bit' — NF4, ~7GB, fastest (~30 tok/s on a 3090) but known to malform
+               structured output.
+
+    Quantized loads pin to one GPU so a model that doesn't fit OOMs loudly
+    instead of silently offloading.
+    """
+    import torch
+    if quantize is None:
+        return dict(dtype=torch.bfloat16, device_map="auto")
+    from transformers import BitsAndBytesConfig
+    if quantize == "8bit":
+        qc = BitsAndBytesConfig(load_in_8bit=True)
+    elif quantize == "4bit":
+        qc = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+        )
+    else:
+        raise ValueError(f"quantize must be None, '4bit' or '8bit', got {quantize!r}")
+    return dict(quantization_config=qc, dtype=torch.bfloat16, device_map="cuda:0")
+
+
 class UnifiedEngine:
-    def __init__(self, model_id=MODEL_ID):
+    def __init__(self, model_id=MODEL_ID, quantize=None):
         import os
         os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
         import torch
         from transformers import AutoProcessor, AutoModelForImageTextToText
 
         self.torch = torch
-        note(f"loading {model_id} (unified vision+text engine)...")
+        note(f"loading {model_id} (unified vision+text engine, "
+             f"{quantize or 'bf16'})...")
         with instrument.Timer() as t:
             self.processor = AutoProcessor.from_pretrained(model_id)
             self.tokenizer = self.processor.tokenizer
             self.model = AutoModelForImageTextToText.from_pretrained(
-                model_id, dtype=torch.bfloat16, device_map="auto"
+                model_id, **model_load_kwargs(quantize)
             )
         METRICS.model_load_s = t.elapsed
         note(f"model ready in {t.elapsed:.1f}s")

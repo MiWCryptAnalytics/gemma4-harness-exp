@@ -98,7 +98,25 @@ Or drive `gemma4.py` directly:
 
 Useful flags: `--vision` (eyes + draw), `--network`, `--exec-workspace` (run
 compiled binaries), `--exec-timeout`, `--max-steps`, `--task`/`--task-file`,
-`--system-file`/`--system-prompt-file`, `--workspace`, `--debug`, `--dry-run`.
+`--system-file`/`--system-prompt-file`, `--workspace`, `--debug`, `--dry-run`,
+`--quantize {4bit,8bit}` (see below).
+
+### Precision vs speed (`--quantize`)
+
+The model loads in full **bf16 by default**. On a 24 GB card the 12B's weights
+(~23 GB) don't fit next to the KV cache, so some layers offload to CPU and
+generation is slow (~2 tok/s) — but output fidelity is maximal. That default is
+deliberate: in our testing, **4-bit quantization often emits malformed SVG/XML**,
+which breaks the structured-output tool workflows (`svg_studio`, `create_image`).
+
+For speed experiments where fidelity matters less:
+
+- `--quantize 8bit` — int8, ~13 GB, fits a 24 GB card fully on-GPU. Mild
+  fidelity loss; validate your workflow's structured outputs before relying on it.
+- `--quantize 4bit` — NF4, ~7 GB, fastest (~30 tok/s on a 3090), least faithful.
+
+Make targets accept the same as a variable: `QUANTIZE=4bit make demo`. Plain
+`make <target>` always runs unquantized.
 
 ### Prompts
 

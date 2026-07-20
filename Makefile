@@ -2,8 +2,12 @@
 #   make help     list targets
 #   make demo     the grand all-tools variety show (GPU)
 #   make test     fast no-GPU correctness tests
+#
+# All GPU targets run the model at full bf16 (best structured-output fidelity;
+# 4-bit was found to malform SVG/XML). For speed experiments, opt in with:
+#   QUANTIZE=4bit make demo    (or QUANTIZE=8bit)
 PY    := ./venv/bin/python
-GEMMA := $(PY) gemma4.py
+GEMMA := $(PY) gemma4.py $(if $(QUANTIZE),--quantize $(QUANTIZE))
 IMAGE := gemma4-sandbox:v9
 PROXY := gemma4-mitm:v3
 CA    := sandbox/mitm/ca.crt
@@ -41,7 +45,7 @@ music:  ## Agent composes ABC music and synthesizes a WAV (voice)
 	  --task "Compose a short cheerful original melody in ABC notation, using multiple instruments, with a clear key and tempo and synthesize it to melody.wav with compose_music. Report the ABC."
 
 image:  ## Quality-gated image agent (picture-making + vision scoring)
-	$(PY) image_agent.py --request "Show me a picture of a lighthouse on a cliff at night."
+	$(PY) image_agent.py $(if $(QUANTIZE),--quantize $(QUANTIZE)) --request "Show me a picture of a lighthouse on a cliff at night."
 
 ## ---- no-GPU checks -------------------------------------------------------
 

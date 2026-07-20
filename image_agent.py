@@ -33,6 +33,9 @@ def main():
     ap.add_argument("--request", default="Show me a picture of a lighthouse on a cliff at night.")
     ap.add_argument("--mock", action="store_true",
                     help="Run the wiring with a fake engine (no GPU).")
+    ap.add_argument("--quantize", choices=["4bit", "8bit"], default=None,
+                    help="Opt-in weight quantization; default full bf16 (4-bit is "
+                         "known to malform the SVG XML this agent depends on).")
     args = ap.parse_args()
 
     if args.mock:
@@ -40,7 +43,7 @@ def main():
         engine = FakeEngine()
     else:
         from engine import UnifiedEngine
-        engine = UnifiedEngine()
+        engine = UnifiedEngine(quantize=args.quantize)
 
     image_tool.set_engine(engine)
     # The sandbox is needed for the in-container SVG rasterization.

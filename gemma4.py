@@ -52,23 +52,25 @@ def _truncate(text):
             + text[-_TOOL_OUTPUT_TAIL:])
 
 
-def build_transformers_engine():
+def build_transformers_engine(quantize=None):
     """Lazily load the real model; return a TransformersEngine.
 
     Imports torch/transformers only when called, so --dry-run needs neither the
-    libraries nor a GPU.
+    libraries nor a GPU. `quantize` (None | '4bit' | '8bit') is opt-in — see
+    engine.model_load_kwargs for the fidelity tradeoff.
     """
     import os
     # Reduce CUDA fragmentation OOMs as the KV cache grows over a long agent run.
     os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    import torch
     from transformers import AutoTokenizer, AutoModelForCausalLM
 
-    note(f"loading {model_id} (text engine)...")
+    from engine import model_load_kwargs
+
+    note(f"loading {model_id} (text engine, {quantize or 'bf16'})...")
     with instrument.Timer() as t:
         tokenizer = AutoTokenizer.from_pretrained(model_id)
         model = AutoModelForCausalLM.from_pretrained(
-            model_id, dtype=torch.bfloat16, device_map="auto"
+            model_id, **model_load_kwargs(quantize)
         )
     METRICS.model_load_s = t.elapsed
     note(f"model ready in {t.elapsed:.1f}s")
@@ -186,6 +188,11 @@ def main():
                              "into the MITM proxy. Requires --network.")
     parser.add_argument("--vision", action="store_true",
                         help="Give the agent eyes: load the unified model and the look_at tool.")
+    parser.add_argument("--quantize", choices=["4bit", "8bit"], default=None,
+                        help="Opt-in weight quantization (speed over fidelity). Default is "
+                             "full bf16: 4-bit is known to emit malformed SVG/XML, breaking "
+                             "structured tool output. 8bit (~13GB) fits a 24GB card on-GPU; "
+                             "4bit (~7GB) is fastest but least faithful.")
     parser.add_argument("--debug", action="store_true",
                         help="Verbose instrumentation: per-step, per-generation, sandbox timings.")
     args = parser.parse_args()
@@ -211,11 +218,11 @@ def main():
             from engine import UnifiedEngine
             import vision_tool  # registers look_at
             import image_tool   # registers create_image
-            engine = UnifiedEngine()
+            engine = UnifiedEngine(quantize=args.quantize)
             vision_tool.set_engine(engine)
             image_tool.set_engine(engine)
         else:
-            engine = build_transformers_engine()
+            engine = build_transformers_engine(quantize=args.quantize)
 
         # Prompts live in external text files so they can be iterated on without
         # touching the code (see prompts/).
