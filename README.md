@@ -229,7 +229,7 @@ instrument.py      metrics + debug instrumentation
 svg_studio.py      SVG generate→render→self-critique→refine loop + sanitizer
 image_tool.py      create_image (quality-gated)
 vision_tool.py     look_at
-music.py           ABC-notation → WAV synthesizer
+music.py           ABC-notation → WAV synthesizer (fluidsynth soundfont, sine fallback)
 multimodal.py      multimodal message construction + standalone vision engine
 mockmodel.py       no-GPU workflow replay
 generate_workflows.py  records native model workflows for dry-run

@@ -12,12 +12,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         curl wget ca-certificates tar xz-utils \
         gcc make libc6-dev \
         libpcre2-dev zlib1g-dev libssl-dev \
+        libfluidsynth3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Scientific Python so the agent's run_python tool is a real data-science brain:
 # numeric (numpy), symbolic (sympy), tabular (pandas), plotting (matplotlib).
-# Installed at build time; importable under the read-only root at runtime.
-RUN pip install --no-cache-dir numpy sympy pandas matplotlib
+# pyfluidsynth binds libfluidsynth so compose_music renders with real
+# instruments in here (music.py falls back to sine synthesis without it).
+RUN pip install --no-cache-dir numpy sympy pandas matplotlib pyfluidsynth
+
+# The GeneralUser GS soundfont for compose_music — fetched into the build
+# context by `make soundfont`; music.py looks for it at this path.
+COPY GeneralUser-GS.sf2 /usr/share/soundfonts/GeneralUser-GS.sf2
 
 # matplotlib + fontconfig need writable config/cache dirs; HOME and /var are
 # read-only at runtime, so point both at the tmpfs (otherwise font rendering

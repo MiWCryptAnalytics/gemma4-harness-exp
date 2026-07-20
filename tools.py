@@ -251,7 +251,7 @@ def run_python(code: str):
 
 @tool
 def compose_music(abc: str, path: str = "song.wav"):
-    """Synthesize music written in ABC notation into a playable WAV audio file."""
+    """Synthesize music written in ABC notation into a playable WAV audio file. An optional '%%MIDI program N' line selects the General MIDI instrument (0 piano, 24 guitar, 40 violin, 73 flute)."""
     import pathlib
     sandbox = get_active()
     # Ship our trusted ABC->WAV synthesizer into the sandbox and run it there on

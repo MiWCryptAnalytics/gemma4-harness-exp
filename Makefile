@@ -4,13 +4,15 @@
 #   make test     fast no-GPU correctness tests
 PY    := ./venv/bin/python
 GEMMA := $(PY) gemma4.py
-IMAGE := gemma4-sandbox:v8
+IMAGE := gemma4-sandbox:v9
 PROXY := gemma4-mitm:v3
 CA    := sandbox/mitm/ca.crt
+SF2   := sandbox/GeneralUser-GS.sf2
+SF2_URL := https://github.com/mrbumpy409/GeneralUser-GS/raw/refs/heads/main/GeneralUser-GS.sf2
 
 .DEFAULT_GOAL := help
 
-.PHONY: help demo test dry-run sysinfo nginx chart music image metrics doctor mitm-ca mitm-verify policy-verify sandbox-build clean
+.PHONY: help demo test dry-run sysinfo nginx chart music image metrics doctor mitm-ca mitm-verify policy-verify soundfont sandbox-build clean
 
 help:  ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -36,7 +38,7 @@ chart:  ## Agent computes, plots, and SEES a chart (brain + eyes)
 
 music:  ## Agent composes ABC music and synthesizes a WAV (voice)
 	$(GEMMA) --debug --max-steps 6 \
-	  --task "Compose a short cheerful original melody in ABC notation (clear key and tempo) and synthesize it to melody.wav with compose_music. Report the ABC."
+	  --task "Compose a short cheerful original melody in ABC notation, using multiple instruments, with a clear key and tempo and synthesize it to melody.wav with compose_music. Report the ABC."
 
 image:  ## Quality-gated image agent (picture-making + vision scoring)
 	$(PY) image_agent.py --request "Show me a picture of a lighthouse on a cliff at night."
@@ -90,7 +92,11 @@ policy-verify: mitm-ca  ## Prove web policy: agent hits a header-pin + a blocked
 	$(GEMMA) --debug --network --policy-file examples/policy.example.yaml --exec-timeout 60 --max-steps 5 \
 	  --task "Run: curl -s https://httpbin.org/headers | grep -i user-agent  (report the User-Agent verbatim; policy pins it to Gemma4-Agent/1.0). Then run: curl -s -o /dev/null -w '%{http_code}' https://www.facebook.com/ and report the status code (policy blocks it -> 403)."
 
-sandbox-build: mitm-ca  ## Pre-build the sandbox + MITM proxy images (proxy compiles Squid from source)
+soundfont: $(SF2)  ## Fetch the GeneralUser GS soundfont (host synth + sandbox build)
+$(SF2):
+	curl -fL -o $(SF2) $(SF2_URL)
+
+sandbox-build: mitm-ca $(SF2)  ## Pre-build the sandbox + MITM proxy images (proxy compiles Squid from source)
 	docker build -t $(IMAGE) sandbox/
 	docker build -t $(PROXY) -f sandbox/squid/Dockerfile sandbox/
 

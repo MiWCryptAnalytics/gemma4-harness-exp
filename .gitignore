@@ -29,6 +29,9 @@ generated_workflows.json
 # `make mitm-ca`). Both cert and key are host-local and gitignored together.
 sandbox/mitm/
 
+# GeneralUser GS soundfont (32 MB binary; re-fetch with `make soundfont`)
+sandbox/GeneralUser-GS.sf2
+
 # Editor / OS
 .vscode/
 .idea/

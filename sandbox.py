@@ -21,7 +21,7 @@ import subprocess
 from pathlib import Path
 
 # Bump the tag whenever sandbox/Dockerfile changes so a stale image is rebuilt.
-IMAGE_TAG = "gemma4-sandbox:v8"
+IMAGE_TAG = "gemma4-sandbox:v9"
 _DOCKERFILE_DIR = Path(__file__).resolve().parent / "sandbox"
 
 # Transparent MITM proxy: when networking is enabled the sandbox reaches the
