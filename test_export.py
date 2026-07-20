@@ -28,7 +28,8 @@ with tempfile.TemporaryDirectory() as tmp:
     with Sandbox() as sb:
         # Write a text file and a nested binary-ish file inside the tmpfs workspace.
         sb.run("echo 'hello eval' > /workspace/a.txt")
-        sb.run("mkdir -p /workspace/sub && printf '\\x89PNG' > /workspace/sub/img.png")
+        # Octal \211 == 0x89 — dash/busybox printf support \nnn but not \xHH.
+        sb.run("mkdir -p /workspace/sub && printf '\\211PNG' > /workspace/sub/img.png")
         sb.export_workspace(out)
 
     a = out / "a.txt"

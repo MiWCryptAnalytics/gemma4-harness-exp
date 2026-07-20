@@ -1,0 +1,5 @@
+# Baked default policy: allow everything, adapt nothing. With no --policy-file,
+# the proxy behaves exactly as before this feature (pure MITM inspection).
+version: 1
+default: allow
+rules: []

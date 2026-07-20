@@ -120,6 +120,71 @@ Untrusted, model-authored SVG is sanitized (text/script/external refs stripped)
 *and* rasterized inside the sandbox, so it can't smuggle instructions into the
 vision-scoring loop or exploit the renderer.
 
+### Transparent MITM proxy (`--network`)
+
+When networking is enabled, the sandbox does **not** reach the internet directly
+— every connection is transparently man-in-the-middled so the harness has full
+visibility and control over the agent's egress:
+
+- A separate **Squid** container ([`sandbox/squid/`](sandbox/squid/)) — with
+  Squid **built from source** in a multi-stage image so it has OpenSSL
+  `ssl-bump` + `--enable-linux-netfilter` intercept support — re-signs every TLS
+  leaf on the fly with a local **MITM CA**.
+- The sandbox trusts **only** that CA: its stock `ca-certificates` bundle is
+  stripped to a single cert at build time (verified in the Dockerfile), and
+  `SSL_CERT_FILE`/`REQUESTS_CA_BUNDLE`/`CURL_CA_BUNDLE`/`PIP_CERT` point curl,
+  wget, Python `requests`, and `pip` at it. Any HTTPS **not** passing through the
+  proxy can't validate and **fails closed**.
+- Interception is done by having the sandbox **share the proxy's network
+  namespace** (`--network container:<proxy>`); the proxy's `iptables` rules
+  REDIRECT the agent's `:80`/`:443` into Squid and **DROP all other egress**
+  except DNS. Only the proxy is privileged (`NET_ADMIN`) — the sandbox stays
+  `--cap-drop ALL`.
+
+One-time setup generates the CA (the private key is gitignored):
+
+```bash
+make mitm-ca          # openssl → sandbox/mitm/ca.{crt,key}
+make sandbox-build    # builds the sandbox + proxy images (proxy compiles Squid)
+make mitm-verify      # proves interception end-to-end (agent curls HTTPS)
+```
+
+DNS (port 53) is allowed out un-inspected — an inherent property of transparent
+interception (the client resolves the name before the redirect). Non-network and
+`--dry-run` runs are unaffected (`--network none`, no proxy).
+
+### Web policy: block / redirect / modify / adapt (`--policy-file`)
+
+Because the proxy already decrypts everything, it can also **act** on it. A hand-
+rolled Python **ICAP server** ([sandbox/squid/icap_server.py](sandbox/squid/icap_server.py))
+runs inside the proxy and Squid vectors every request through it:
+
+- **REQMOD** — before the origin is contacted: **block** (a synthesized 403 page),
+  **redirect** (302), **modify the request** (set/remove headers — e.g. inject
+  credentials), or **rewrite the path in place** (regex, same origin). Path rewrites
+  + header injection are transparent to the agent — useful for pinning a registry to
+  an approved path and adding an auth token. Cross-host offload to a separate mirror
+  uses `redirect` (the client follows the 302): an intercepted TLS connection is
+  pinned to its original upstream, so an in-place host change can't reroute it.
+- **RESPMOD** — after the origin responds: **adapt the body** (regex rewrite /
+  inject / redact), content-type scoped, with gzip handled correctly.
+
+Policy is a declarative, hot-reloadable YAML file (first-match-wins rules by
+host/URL/method + a `default:` of `allow` or `deny`). Pass one with `--policy-file`;
+with none, the baked default is allow-all (identical to pure MITM inspection):
+
+```bash
+./venv/bin/python gemma4.py --network --policy-file examples/policy.example.yaml --task "..."
+make policy-verify    # proves block + header-pin end-to-end through the agent
+```
+
+See [examples/policy.example.yaml](examples/policy.example.yaml) for the schema. If
+the ICAP server is unavailable the proxy **fails closed** (Squid errors the request)
+rather than leaking un-adapted traffic. The agent (which shares the proxy's netns)
+is firewalled off the ICAP port by owner-uid, so it can't reach or tamper with the
+policy engine. The engine ([sandbox/squid/policy.py](sandbox/squid/policy.py)) is
+pure and host-importable, unit-tested by `test_policy.py`.
+
 ## Instrumentation
 
 Every run reports tokens/sec per generation and a summary (model-load time,
@@ -156,8 +221,10 @@ gemma4.py          native tool-calling agent loop + CLI
 engine.py          UnifiedEngine (one model: text tool-calling + vision)
 tokens.py          reserved control-token constants
 tools.py           tool registry, schema gen, native <|tool_call> parser, sandbox tools
-sandbox.py         Docker sandbox lifecycle
-sandbox/Dockerfile sandbox image (toolchain, librsvg, scientific Python)
+sandbox.py         Docker sandbox + MITM-proxy lifecycle
+sandbox/Dockerfile sandbox image (toolchain, librsvg, scientific Python, MITM-CA-only trust)
+sandbox/squid/     MITM proxy: Squid-from-source Dockerfile, squid.conf, entrypoint, ICAP policy server (icap_server.py + policy.py)
+sandbox/mitm/      generated MITM CA (gitignored; `make mitm-ca`)
 instrument.py      metrics + debug instrumentation
 svg_studio.py      SVG generate→render→self-critique→refine loop + sanitizer
 image_tool.py      create_image (quality-gated)

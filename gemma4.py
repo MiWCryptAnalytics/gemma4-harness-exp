@@ -181,11 +181,18 @@ def main():
     parser.add_argument("--workspace", default=None,
                         help="Host directory to export the sandbox /workspace into after the run "
                              "(so an external eval driver can grade the artifacts).")
+    parser.add_argument("--policy-file", default=None,
+                        help="Host YAML web-policy file (block/redirect/modify/adapt), hot-reloaded "
+                             "into the MITM proxy. Requires --network.")
     parser.add_argument("--vision", action="store_true",
                         help="Give the agent eyes: load the unified model and the look_at tool.")
     parser.add_argument("--debug", action="store_true",
                         help="Verbose instrumentation: per-step, per-generation, sandbox timings.")
     args = parser.parse_args()
+
+    # A web policy only has effect on the MITM-proxied network path.
+    if args.policy_file and not args.network:
+        parser.error("--policy-file requires --network (the policy runs in the MITM proxy)")
 
     instrument.reset()
     instrument.set_debug(args.debug)
@@ -223,7 +230,8 @@ def main():
 
     answer = None
     with Sandbox(network=args.network, exec_timeout=args.exec_timeout,
-                 exec_workspace=args.exec_workspace) as sb:
+                 exec_workspace=args.exec_workspace,
+                 policy_file=args.policy_file) as sb:
         try:
             answer = run_agent(system_rules, task, engine, max_steps=args.max_steps,
                                enable_thinking=args.think)

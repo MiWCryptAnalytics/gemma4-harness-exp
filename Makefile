@@ -4,11 +4,13 @@
 #   make test     fast no-GPU correctness tests
 PY    := ./venv/bin/python
 GEMMA := $(PY) gemma4.py
-IMAGE := gemma4-sandbox:v7
+IMAGE := gemma4-sandbox:v8
+PROXY := gemma4-mitm:v3
+CA    := sandbox/mitm/ca.crt
 
 .DEFAULT_GOAL := help
 
-.PHONY: help demo test dry-run sysinfo nginx chart music image metrics doctor sandbox-build clean
+.PHONY: help demo test dry-run sysinfo nginx chart music image metrics doctor mitm-ca mitm-verify policy-verify sandbox-build clean
 
 help:  ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -48,6 +50,9 @@ test:  ## Run all no-GPU correctness tests
 	$(PY) test_vision_tool.py
 	$(PY) test_image_agent.py
 	$(PY) test_export.py
+	$(PY) test_ca_bundle.py
+	$(PY) test_policy.py
+	$(PY) test_policy_e2e.py
 
 dry-run:  ## Replay a recorded native workflow (no GPU)
 	$(GEMMA) --dry-run --workflow datawrangle
@@ -63,8 +68,31 @@ metrics:  ## Summarize recorded run metrics (metrics/*.json)
 doctor:  ## Preflight: check deps, Docker, GPU, and the model
 	@$(PY) doctor.py
 
-sandbox-build:  ## Pre-build the sandbox Docker image
+## ---- MITM proxy ----------------------------------------------------------
+
+mitm-ca: $(CA)  ## Generate the MITM CA on the host (once; private key is gitignored)
+$(CA):
+	@mkdir -p sandbox/mitm
+	openssl genrsa -out sandbox/mitm/ca.key 4096
+	@chmod 600 sandbox/mitm/ca.key
+	openssl req -x509 -new -nodes -key sandbox/mitm/ca.key -sha256 -days 3650 \
+	  -subj "/O=Gemma4-exp/CN=Gemma4 Sandbox MITM CA" \
+	  -addext "basicConstraints=critical,CA:TRUE,pathlen:0" \
+	  -addext "keyUsage=critical,keyCertSign,cRLSign" \
+	  -out sandbox/mitm/ca.crt
+	@echo "MITM CA written to sandbox/mitm/ (ca.key is PRIVATE — never commit)"
+
+mitm-verify: mitm-ca  ## Prove interception: agent curls HTTPS through the proxy (Docker + internet)
+	$(GEMMA) --debug --network --exec-timeout 60 --max-steps 4 \
+	  --task "Run: curl -sSv https://nginx.org/ 2>&1 | grep -i 'issuer:' . Report the certificate issuer verbatim; it should be our MITM CA (O=Gemma4-exp). Then run: curl -sS -m5 http://example.com:8080 ; and report whether it was blocked (fail-closed egress)."
+
+policy-verify: mitm-ca  ## Prove web policy: agent hits a header-pin + a blocked host (Docker + internet)
+	$(GEMMA) --debug --network --policy-file examples/policy.example.yaml --exec-timeout 60 --max-steps 5 \
+	  --task "Run: curl -s https://httpbin.org/headers | grep -i user-agent  (report the User-Agent verbatim; policy pins it to Gemma4-Agent/1.0). Then run: curl -s -o /dev/null -w '%{http_code}' https://www.facebook.com/ and report the status code (policy blocks it -> 403)."
+
+sandbox-build: mitm-ca  ## Pre-build the sandbox + MITM proxy images (proxy compiles Squid from source)
 	docker build -t $(IMAGE) sandbox/
+	docker build -t $(PROXY) -f sandbox/squid/Dockerfile sandbox/
 
 clean:  ## Remove generated artifacts (audio, images, caches, metrics)
 	rm -f *.wav *.png

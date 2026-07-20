@@ -50,6 +50,43 @@ def check_docker():
     return True
 
 
+def check_mitm():
+    """Warn if the MITM CA / proxy image aren't ready. Network-only, so never
+    a hard failure — no-network and dry-run paths don't touch the proxy."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    ca_crt = os.path.join(here, "sandbox", "mitm", "ca.crt")
+    ca_key = os.path.join(here, "sandbox", "mitm", "ca.key")
+    if not (os.path.isfile(ca_crt) and os.path.isfile(ca_key)):
+        line(WARN, "mitm ca", "not generated — `make mitm-ca` (only needed for --network runs)")
+        return False
+    built = subprocess.run(["docker", "image", "inspect", "gemma4-mitm:v3"],
+                           capture_output=True).returncode == 0
+    if built:
+        line(OK, "mitm proxy", "CA present, image built")
+    else:
+        line(WARN, "mitm proxy", "CA present; image builds on first --network run (or `make sandbox-build`)")
+    return True
+
+
+def check_policy():
+    """Warn if the ICAP policy layer isn't ready. Network-only, so never a hard
+    failure. Confirms the proxy image carries a parseable baked default policy."""
+    built = subprocess.run(["docker", "image", "inspect", "gemma4-mitm:v3"],
+                           capture_output=True).returncode == 0
+    if not built:
+        line(WARN, "web policy", "proxy image not built yet (built on first --network run)")
+        return False
+    ok = subprocess.run(
+        ["docker", "run", "--rm", "--entrypoint", "python3", "gemma4-mitm:v3", "-c",
+         "import yaml; yaml.safe_load(open('/etc/squid/policy.yaml'))"],
+        capture_output=True).returncode == 0
+    if ok:
+        line(OK, "web policy", "ICAP server + default policy present")
+    else:
+        line(WARN, "web policy", "baked policy failed to parse in the proxy image")
+    return ok
+
+
 def check_gpu():
     try:
         import torch
@@ -86,6 +123,8 @@ def main():
     deps = check_deps()
     print("\n Runtime:")
     docker = check_docker()
+    check_mitm()
+    check_policy()
     gpu = check_gpu()
     model = check_model()
 

@@ -1,0 +1,60 @@
+# Example Gemma4 web policy. Pass with:  gemma4.py --network --policy-file examples/policy.example.yaml
+# Rules are first-match-wins; `set-header` accumulates (non-terminal), while
+# allow/block/redirect are terminal for a request. rewrite-body runs on responses.
+version: 1
+default: allow                 # allow | deny (deny blocks anything not explicitly allowed)
+
+rules:
+  # --- block: return a 403 block page, origin is never contacted ---
+  - name: block-social
+    match: { host: ["*.facebook.com", "x.com", "*.tiktok.com"] }
+    action: block
+    status: 403
+    message: "Blocked by Gemma4 web policy: social media is off-limits for this run."
+
+  # --- redirect: 302 the agent elsewhere ($1 = first url-regex group) ---
+  - name: redirect-legacy-docs
+    match: { url: '^https?://old\.example\.com/(.*)$' }
+    action: redirect
+    location: 'https://new.example.com/$1'
+
+  # --- modify request: pin a User-Agent, strip cookies (non-terminal) ---
+  - name: pin-user-agent
+    match: { host: ["*"], method: ["GET", "POST"] }
+    action: set-header
+    request_headers:
+      set: { User-Agent: "Gemma4-Agent/1.0" }
+      remove: ["Cookie"]
+
+  # --- rewrite request IN-PLACE: same-origin path rewrite + credential
+  #     injection (e.g. pin an npm registry to an approved path prefix and add
+  #     the auth token). This is transparent to the agent. NOTE: rewriting to a
+  #     DIFFERENT host does not reroute an intercepted TLS connection (Squid
+  #     pins the upstream to the original server); to send traffic to a separate
+  #     mirror host, use `action: redirect` (below) instead. ---
+  - name: pin-npm-path-and-auth
+    match: { host: ["registry.npmjs.org"] }
+    action: rewrite
+    rewrite:
+      path: { pattern: '^/(.*)$', replace: '/approved/$1' }   # $1 backref
+    request_headers:
+      set: { Authorization: "Bearer MIRROR_TOKEN" }           # inject creds
+
+  # --- cross-host offload to your own archive: use redirect (the client
+  #     follows the 302 to the mirror; works for npm/pip/curl/wget) ---
+  - name: offload-pypi-to-mirror
+    match: { url: '^https?://files\.pythonhosted\.org/(.*)$' }
+    action: redirect
+    location: 'https://pypi-archive.internal/$1'
+
+  # --- adapt response: redact secrets + inject a marker into HTML/JSON ---
+  - name: redact-secrets
+    match:
+      host: ["*"]
+      content_type: ["text/*", "application/json"]
+    action: rewrite-body
+    response_body:
+      - pattern: '(?i)(api[_-]?key\s*["'':=]\s*)\S+'
+        replace: '\1[REDACTED]'
+      - pattern: '</body>'
+        replace: '<!-- inspected by gemma4 mitm --></body>'

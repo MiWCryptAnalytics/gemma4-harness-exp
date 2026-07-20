@@ -25,6 +25,10 @@ generated_workflows.json
 *.png
 *_probe.json
 
+# MITM CA material — the private key must NEVER be committed (regenerate with
+# `make mitm-ca`). Both cert and key are host-local and gitignored together.
+sandbox/mitm/
+
 # Editor / OS
 .vscode/
 .idea/
