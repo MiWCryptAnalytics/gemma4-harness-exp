@@ -44,7 +44,10 @@ def model_load_kwargs(quantize=None):
         return dict(dtype=torch.bfloat16, device_map="auto")
     from transformers import BitsAndBytesConfig
     if quantize == "8bit":
-        qc = BitsAndBytesConfig(load_in_8bit=True)
+        qc = BitsAndBytesConfig(
+            load_in_8bit=True,
+            llm_int8_skip_modules=["norm", "ln_f", "input_layernorm", "post_attention_layernorm"]
+        )
     elif quantize == "4bit":
         qc = BitsAndBytesConfig(
             load_in_4bit=True,
