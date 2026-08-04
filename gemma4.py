@@ -17,9 +17,9 @@ import sys
 import time
 
 import instrument
-from instrument import METRICS, debug, note
+from instrument import METRICS, debug, note, trace
 from sandbox import Sandbox
-from tokens import TOOL_CALL_CLOSE, TURN_CLOSE, clean
+from tokens import clean, extract_channels
 from tools import REGISTRY, dispatch, parse_tool_calls, tools_schema
 
 # Override with GEMMA_MODEL_ID to compare other models (note: the native
@@ -52,53 +52,43 @@ def _truncate(text):
             + text[-_TOOL_OUTPUT_TAIL:])
 
 
-def build_transformers_engine(quantize=None):
-    """Lazily load the real model; return a TransformersEngine.
+def _summarize_net_audit(text):
+    """Condense the proxy's audit JSONL into counts for the metrics record."""
+    import json
+    requests = blocked = redirected = rewritten = 0
+    hosts = set()
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        action = rec.get("action")
+        if rec.get("phase") == "reqmod":
+            requests += 1
+            hosts.add(rec.get("host", ""))
+            blocked += action == "block"
+            redirected += action == "redirect"
+        elif action == "rewrite-body":
+            rewritten += 1
+    return {"requests": requests, "blocked": blocked, "redirected": redirected,
+            "bodies_rewritten": rewritten, "hosts": len(hosts)}
 
-    Imports torch/transformers only when called, so --dry-run needs neither the
-    libraries nor a GPU. `quantize` (None | '4bit' | '8bit') is opt-in — see
-    engine.model_load_kwargs for the fidelity tradeoff.
+
+def build_transformers_engine(quantize=None, kv_reuse=False, stream=False):
+    """Lazily load the real model, text-only; return a UnifiedEngine.
+
+    Imports torch/transformers only when called (via engine), so --dry-run needs
+    neither the libraries nor a GPU. `quantize` (None | '4bit' | '8bit') is
+    opt-in — see engine.model_load_kwargs for the fidelity tradeoff. vision=False
+    loads AutoModelForCausalLM, so the vision tower costs no VRAM on this path
+    while the generation logic stays shared with the --vision engine.
     """
-    import os
-    # Reduce CUDA fragmentation OOMs as the KV cache grows over a long agent run.
-    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
-    from transformers import AutoTokenizer, AutoModelForCausalLM
-
-    from engine import model_load_kwargs
-
-    note(f"loading {model_id} (text engine, {quantize or 'bf16'})...")
-    with instrument.Timer() as t:
-        tokenizer = AutoTokenizer.from_pretrained(model_id)
-        model = AutoModelForCausalLM.from_pretrained(
-            model_id, **model_load_kwargs(quantize)
-        )
-    METRICS.model_load_s = t.elapsed
-    note(f"model ready in {t.elapsed:.1f}s")
-
-    class TransformersEngine:
-        def __call__(self, messages, tools=None, enable_thinking=False):
-            prompt = tokenizer.apply_chat_template(
-                messages, tools=tools, tokenize=False,
-                add_generation_prompt=True, enable_thinking=enable_thinking,
-            )
-            inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-            n_prompt = inputs["input_ids"].shape[1]
-            debug(f"generating (prompt {n_prompt} tok, max_new 1024)...")
-            with instrument.Timer() as t:
-                out = model.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    temperature=0.2,
-                    tokenizer=tokenizer,
-                    # Stop right after a tool call or at the end of the turn.
-                    stop_strings=[TOOL_CALL_CLOSE, TURN_CLOSE],
-                )
-            gen = out[0][n_prompt:]
-            METRICS.record_generation("text-agent", n_prompt, len(gen), t.elapsed)
-            # Keep special tokens: we need <|tool_call> / <|"|> to survive.
-            return tokenizer.decode(gen, skip_special_tokens=False)
-
-    return TransformersEngine()
+    from engine import UnifiedEngine
+    return UnifiedEngine(model_id=model_id, quantize=quantize, vision=False,
+                         kv_reuse=kv_reuse, stream=stream)
 
 
 def run_agent(system_instruction, user_prompt, engine, max_steps=8,
@@ -117,13 +107,24 @@ def run_agent(system_instruction, user_prompt, engine, max_steps=8,
 
     for step in range(1, max_steps + 1):
         debug(f"step {step}/{max_steps}: {len(messages)} messages in context")
+        trace("step_start", step=step, max_steps=max_steps, n_messages=len(messages))
         reply = engine(messages, tools=schema, enable_thinking=enable_thinking)
         calls = parse_tool_calls(reply)
         debug(f"step {step}: parsed {len(calls)} tool call(s)")
+        trace("model_output", step=step, raw=reply, raw_len=len(reply),
+              n_calls=len(calls))
+        # clean() drops the reasoning channel; capture it first so a --think run
+        # keeps its reasoning in the trace (full text there, a snippet here).
+        thinking = extract_channels(reply)
+        if thinking:
+            trace("thinking", step=step, texts=thinking,
+                  chars=sum(len(t) for t in thinking))
+            debug(f"think: {thinking[0][:200]}")
 
         if not calls:
             answer = clean(reply)
             print(f"\n[Final answer]:\n{answer}")
+            trace("final_answer", step=step, answer=answer, chars=len(answer))
             print(METRICS.summary())
             return answer
 
@@ -141,17 +142,21 @@ def run_agent(system_instruction, user_prompt, engine, max_steps=8,
 
         for c in calls:
             print(f"\n[Step {step}] call: {c['name']}({c['arguments']})")
+            trace("tool_call", step=step, name=c["name"], arguments=c["arguments"])
             with instrument.Timer() as t:
                 result = dispatch(c["name"], c["arguments"])
             METRICS.record_tool(c["name"], t.elapsed)
             print(f"[Step {step}] result:\n{result}")
             # Feed back a bounded view so a giant build log can't blow up context.
-            messages.append({"role": "tool", "name": c["name"],
-                             "content": _truncate(result)})
+            fed = _truncate(result)
+            trace("tool_result", step=step, name=c["name"], result=fed,
+                  result_len=len(str(result)), seconds=round(t.elapsed, 3))
+            messages.append({"role": "tool", "name": c["name"], "content": fed})
 
     print(METRICS.summary())
 
     print(f"\n[Stopped: reached max_steps={max_steps} without a final answer]")
+    trace("max_steps", max_steps=max_steps)
     return None
 
 
@@ -187,12 +192,19 @@ def main():
                         help="Host YAML web-policy file (block/redirect/modify/adapt), hot-reloaded "
                              "into the MITM proxy. Requires --network.")
     parser.add_argument("--vision", action="store_true",
-                        help="Give the agent eyes: load the unified model and the look_at tool.")
+                        help="Give the agent eyes and ears: load the unified model plus the "
+                             "look_at, create_image and listen tools.")
     parser.add_argument("--quantize", choices=["4bit", "8bit"], default=None,
                         help="Opt-in weight quantization (speed over fidelity). Default is "
                              "full bf16: 4-bit is known to emit malformed SVG/XML, breaking "
                              "structured tool output. 8bit (~13GB) fits a 24GB card on-GPU; "
                              "4bit (~7GB) is fastest but least faithful.")
+    parser.add_argument("--stream", action="store_true",
+                        help="Stream generated tokens live to stderr as they arrive.")
+    parser.add_argument("--kv-reuse", action="store_true",
+                        help="Carry the KV cache across agent steps. Off by default: "
+                             "measured to never hit on Gemma 4's chat template "
+                             "(see engine.KV_REUSE_NOTE), so it would only pin VRAM.")
     parser.add_argument("--debug", action="store_true",
                         help="Verbose instrumentation: per-step, per-generation, sandbox timings.")
     args = parser.parse_args()
@@ -204,6 +216,18 @@ def main():
     instrument.reset()
     instrument.set_debug(args.debug)
 
+    # One stamp for every artifact this run writes (metrics, trace, net audit).
+    stamp = instrument.run_stamp()
+    engine_kind = "mock" if args.dry_run else ("unified" if args.vision else "text")
+    model_label = "mock" if args.dry_run else model_id
+    trace_path = instrument.init_trace(
+        os.path.join("metrics", f"{stamp}_trace.jsonl"),
+        model=model_label, engine=engine_kind, quantize=args.quantize,
+        network=args.network, vision=args.vision, think=args.think,
+        max_steps=args.max_steps, policy_file=args.policy_file,
+        exec_workspace=args.exec_workspace, exec_timeout=args.exec_timeout,
+    )
+
     if args.dry_run:
         from mockmodel import MockModel, WORKFLOWS
         if args.workflow not in WORKFLOWS:
@@ -214,15 +238,22 @@ def main():
         print(f"[dry-run] replaying '{args.workflow}' "
               f"({len(wf['turns'])} turns, source: {wf.get('source', 'unknown')}), no GPU.")
     else:
+        kv_reuse = args.kv_reuse
+        if args.network:
+            import web_tool  # noqa: F401  (registers browse)
         if args.vision:
             from engine import UnifiedEngine
             import vision_tool  # registers look_at
             import image_tool   # registers create_image
-            engine = UnifiedEngine(quantize=args.quantize)
+            import audio_tool   # registers listen (hears via the vision tower)
+            engine = UnifiedEngine(quantize=args.quantize, kv_reuse=kv_reuse,
+                                   stream=args.stream)
             vision_tool.set_engine(engine)
             image_tool.set_engine(engine)
+            audio_tool.set_engine(engine)
         else:
-            engine = build_transformers_engine(quantize=args.quantize)
+            engine = build_transformers_engine(quantize=args.quantize,
+                                               kv_reuse=kv_reuse, stream=args.stream)
 
         # Prompts live in external text files so they can be iterated on without
         # touching the code (see prompts/).
@@ -230,6 +261,8 @@ def main():
         system_rules = open(system_file).read().strip()
         if args.vision:
             system_rules += "\n" + open(load_prompt_path("system_vision.txt")).read().strip()
+        if args.network:
+            system_rules += "\n" + open(load_prompt_path("system_network.txt")).read().strip()
         if args.task_file:
             task = open(args.task_file).read().strip()
         else:
@@ -242,17 +275,39 @@ def main():
         try:
             answer = run_agent(system_rules, task, engine, max_steps=args.max_steps,
                                enable_thinking=args.think)
+        except Exception as exc:
+            trace("error", type=type(exc).__name__, message=str(exc))
+            raise
         finally:
             # Export artifacts even if the run errored or hit max_steps, so an
             # external grader still sees whatever the agent managed to produce.
+            # The trace deliberately stays in metrics/: anything left in the
+            # workspace would show up in an eval's artifact globs.
             if args.workspace:
                 sb.export_workspace(args.workspace)
                 note(f"workspace exported to {args.workspace}")
 
-    engine_kind = "mock" if args.dry_run else ("unified" if args.vision else "text")
-    model_label = "mock" if args.dry_run else model_id
-    path = METRICS.log_run(model=model_label, engine=engine_kind)
+    extra = {"engine": engine_kind}
+    if trace_path:
+        extra["trace"] = trace_path
+    # The MITM proxy records every request it decided on; keep it beside the
+    # run's other artifacts so a grader can assert on network behavior.
+    if sb.net_audit:
+        audit_path = os.path.join("metrics", f"{stamp}_netaudit.jsonl")
+        with open(audit_path, "w") as fh:
+            fh.write(sb.net_audit)
+        summary = _summarize_net_audit(sb.net_audit)
+        note(f"network audit written to {audit_path} "
+             f"({summary['requests']} requests, {summary['blocked']} blocked)")
+        trace("net_audit_summary", path=audit_path, **summary)
+        extra["net_audit"] = summary
+
+    path = METRICS.log_run(model=model_label, stamp=stamp, **extra)
     note(f"metrics written to {path}")
+    if trace_path:
+        note(f"trace written to {trace_path}")
+    trace("run_end", answered=answer is not None, metrics=path)
+    instrument.close_trace()
 
     # Exit code is the eval contract's success signal: 0 iff the agent reached a
     # final answer; non-zero on max_steps (answer is None) so `exit_zero` checks bite.

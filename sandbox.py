@@ -28,7 +28,7 @@ _DOCKERFILE_DIR = Path(__file__).resolve().parent / "sandbox"
 # internet ONLY through this Squid container (built from source in
 # sandbox/squid/), which re-signs every TLS leaf with our MITM CA. Bump the tag
 # whenever anything under sandbox/squid/ changes.
-PROXY_IMAGE_TAG = "gemma4-mitm:v3"
+PROXY_IMAGE_TAG = "gemma4-mitm:v4"
 _PROXY_DOCKERFILE = _DOCKERFILE_DIR / "squid" / "Dockerfile"
 _CA_CERT = _DOCKERFILE_DIR / "mitm" / "ca.crt"
 _CA_KEY = _DOCKERFILE_DIR / "mitm" / "ca.key"
@@ -63,6 +63,8 @@ class Sandbox:
                  exec_timeout=60, exec_workspace=False, policy_file=None):
         self.container_id = None
         self.proxy_id = None
+        # Filled at teardown from the proxy's ICAP audit log (network runs only).
+        self.net_audit = None
         self.memory = memory
         self.cpus = cpus
         self.pids_limit = pids_limit
@@ -178,8 +180,31 @@ class Sandbox:
         self._stop_proxy()
         raise RuntimeError(f"MITM proxy did not become ready:\n{logs.stderr}\n{logs.stdout}")
 
+    def collect_net_audit(self):
+        """Read the proxy's per-request audit JSONL (or None if unavailable).
+
+        The file lives in the proxy container's filesystem, which the agent
+        cannot see: the sandbox shares only the network namespace, not the mount
+        namespace. Must be called before the proxy is killed.
+        """
+        if not self.proxy_id:
+            return None
+        r = subprocess.run(
+            ["docker", "exec", self.proxy_id, "sh", "-c",
+             "cat /var/log/squid/audit.jsonl 2>/dev/null"],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0 or not r.stdout.strip():
+            return None
+        return r.stdout
+
     def _stop_proxy(self):
         if self.proxy_id:
+            # Grab the network audit while the container is still alive.
+            try:
+                self.net_audit = self.collect_net_audit()
+            except Exception as exc:  # never block teardown on bookkeeping
+                print(f"[sandbox] net audit collection failed: {exc!r}")
             subprocess.run(["docker", "kill", self.proxy_id], capture_output=True)
             print(f"[sandbox] stopped MITM proxy {self.proxy_id[:12]}")
             self.proxy_id = None

@@ -50,6 +50,8 @@ _KNOWN_TOKENS = [
     TOOL_DECL_OPEN, TOOL_DECL_CLOSE, STR_DELIM, IMAGE, AUDIO, VIDEO,
 ]
 _CHANNEL_RE = _re.compile(_re.escape(CHANNEL_OPEN) + r".*?" + _re.escape(CHANNEL_CLOSE), _re.DOTALL)
+_CHANNEL_CAPTURE_RE = _re.compile(
+    _re.escape(CHANNEL_OPEN) + r"(.*?)" + _re.escape(CHANNEL_CLOSE), _re.DOTALL)
 
 
 def clean(text):
@@ -58,3 +60,23 @@ def clean(text):
     for tok in _KNOWN_TOKENS:
         text = text.replace(tok, "")
     return text.strip()
+
+
+def extract_channels(text):
+    """Return the model's reasoning-channel blocks (what clean() throws away).
+
+    Under --think the model brackets its private reasoning in
+    <|channel>thought ... <channel|>. clean() drops it for display; the harness
+    records it in the run trace so a run's reasoning is inspectable afterwards.
+    The leading channel name ("thought") and any <|think|> marker are stripped.
+    """
+    out = []
+    for block in _CHANNEL_CAPTURE_RE.findall(text):
+        block = block.replace(THINK, "")
+        head, sep, rest = block.partition("\n")
+        # The first line is the channel name (e.g. "thought"), not content.
+        body = rest if sep and not head.strip().count(" ") else block
+        body = body.strip()
+        if body:
+            out.append(body)
+    return out

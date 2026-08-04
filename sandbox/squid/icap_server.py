@@ -19,14 +19,29 @@ the sandbox agent's uid off this port so the agent can't reach the ICAP service
 over the shared network namespace.
 """
 
+import datetime
 import gzip
 import hashlib
+import json
 import os
 import socketserver
 import sys
 import threading
 import time
 import zlib
+
+# Optional codecs (Debian: python3-zstandard, python3-brotli). When absent,
+# decode_body falls back to pass-through for those encodings — the server must
+# still boot, and REQMOD's Accept-Encoding normalization keeps rewrite-body
+# policies effective regardless.
+try:
+    import zstandard
+except ImportError:
+    zstandard = None
+try:
+    import brotli
+except ImportError:
+    brotli = None
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from policy import Req, load_policy  # noqa: E402
@@ -36,9 +51,44 @@ POLICY_PATH = os.environ.get("GEMMA_POLICY", "/etc/squid/policy.yaml")
 MAX_BODY = 8 * 1024 * 1024        # skip RESPMOD rewrite above this (avoid OOM)
 CRLF = b"\r\n"
 
+# Per-request audit log. Lives in the PROXY container's filesystem: the sandbox
+# shares only this container's network namespace, not its mounts, so the agent
+# cannot read or tamper with its own network record (and is separately firewalled
+# off the ICAP port by owner-uid — see entrypoint.sh). The host collects it at
+# teardown via Sandbox.collect_net_audit().
+AUDIT_PATH = os.environ.get("GEMMA_AUDIT", "/var/log/squid/audit.jsonl")
+AUDIT_MAX_BYTES = 50 * 1024 * 1024   # the agent can generate unbounded requests
+_audit_lock = threading.Lock()
+_audit_state = {"bytes": 0, "capped": False}
+
 
 def log(msg):
     print(f"[icap] {msg}", flush=True)
+
+
+def audit(**fields):
+    """Append one JSON line describing a request/response decision.
+
+    Best-effort by design: auditing must never take the proxy down, so every
+    failure is swallowed after a single log line.
+    """
+    try:
+        record = {"ts": datetime.datetime.now().isoformat(timespec="milliseconds"),
+                  **fields}
+        line = json.dumps(record, default=str) + "\n"
+        with _audit_lock:
+            if _audit_state["capped"]:
+                return
+            if _audit_state["bytes"] + len(line) > AUDIT_MAX_BYTES:
+                _audit_state["capped"] = True
+                log(f"WARNING: audit log hit {AUDIT_MAX_BYTES} bytes; "
+                    "no further entries will be recorded")
+                return
+            with open(AUDIT_PATH, "a", encoding="utf-8") as fh:
+                fh.write(line)
+            _audit_state["bytes"] += len(line)
+    except Exception as exc:
+        log(f"audit write failed: {exc!r}")
 
 
 # --------------------------------------------------------------------------
@@ -296,7 +346,13 @@ def decode_body(body, encoding):
         return gzip.decompress(body), gzip.compress
     if enc == "deflate":
         return zlib.decompress(body), zlib.compress
-    return None, None  # br / zstd — no stdlib codec; don't touch
+    if enc == "zstd" and zstandard is not None:
+        # decompressobj() handles frames without an embedded content size.
+        dec = zstandard.ZstdDecompressor().decompressobj().decompress(body)
+        return dec, (lambda b: zstandard.ZstdCompressor().compress(b))
+    if enc == "br" and brotli is not None:
+        return brotli.decompress(body), brotli.compress
+    return None, None  # codec unavailable — don't touch
 
 
 # --------------------------------------------------------------------------
@@ -404,19 +460,30 @@ class Handler(socketserver.StreamRequestHandler):
         req, start, headers = build_req(ihdrs, reqhdr)
         d = STATE.policy.decide_request(req)
 
+        aud = dict(phase="reqmod", method=req.method, scheme=req.scheme,
+                   host=req.host, path=req.path[:400], rule=d.rule)
+
         if d.action == "block":
             log(f"REQMOD block {req.url}")
+            audit(action="block", status=d.status, **aud)
             hdr, body = http_block_response(d.status, d.message)
             return self._send_resp_message(hdr, body, has_body=True)
         if d.action == "redirect":
             log(f"REQMOD redirect {req.url} -> {d.location}")
+            audit(action="redirect", status=302, location=d.location, **aud)
             hdr, _ = http_redirect_response(d.location)
             return self._send_resp_message(hdr, b"", has_body=False)
 
-        # allow — possibly with a URL/host rewrite and/or header modifications
+        # allow — possibly with a URL/host rewrite and/or header modifications.
+        # When the policy rewrites bodies, pin Accept-Encoding to codecs we can
+        # decode, so an origin can't sidestep RESPMOD by replying br/zstd (an
+        # explicit set-header rule for Accept-Encoding still wins).
+        if STATE.policy.has_body_rules:
+            d.header_ops["set"].setdefault("Accept-Encoding", "gzip, deflate, identity")
         has_ops = bool(d.header_ops["set"] or d.header_ops["remove"])
         has_rewrite = d.rewrite is not None
         if not has_ops and not has_rewrite:
+            audit(action="allow", **aud)
             if allow204:
                 return self._send204()
             body, has_body = self._complete_body(sections, preview)
@@ -430,6 +497,7 @@ class Handler(socketserver.StreamRequestHandler):
         new_reqhdr = serialize_http(new_start, new_headers)
         body, has_body = self._complete_body(sections, preview)
         log(f"REQMOD {'rewrite' if has_rewrite else 'modify'} {req.url}")
+        audit(action="rewrite" if has_rewrite else "modify", **aud)
         return self._send_req_message(new_reqhdr, body, has_body)
 
     # -- RESPMOD ----------------------------------------------------------
@@ -446,19 +514,33 @@ class Handler(socketserver.StreamRequestHandler):
             Req("GET", "https", "", "/"), "", [])
         start, resheaders = parse_http_message(reshdr) if reshdr else ("", [])
         res_hdr_map = {k.lower(): v for k, v in resheaders}
+        status = start.split(" ")[1] if start.count(" ") >= 1 else ""
+        encoding = (res_hdr_map.get("content-encoding") or "identity").strip().lower()
+        aud = dict(phase="respmod", host=req.host, path=req.path[:400],
+                   status=status, bytes=len(body), encoding=encoding,
+                   content_type=res_hdr_map.get("content-type", "").split(";")[0].strip())
 
-        # Decide whether we can/should adapt.
+        # Decide whether we can/should adapt. Each bail-out records WHY, so a
+        # silently-unrewritten body is visible in the audit rather than invisible.
+        in_scope = [r.name for r in
+                    STATE.policy.matching_body_rules(req, res_hdr_map.get("content-type", ""))]
         if not has_body or len(body) > MAX_BODY:
+            audit(action="pass", reason="no-body" if not has_body else "too-large",
+                  rules=in_scope, **aud)
             return self._passthrough_resp(allow204, reshdr, body, has_body)
         decoded, recompress = decode_body(body, res_hdr_map.get("content-encoding"))
         if decoded is None:
+            audit(action="pass", reason=f"undecodable-encoding:{encoding}",
+                  rules=in_scope, **aud)
             return self._passthrough_resp(allow204, reshdr, body, has_body)
 
         new = STATE.policy.decide_response(req, res_hdr_map, decoded)
         if new is None:
+            audit(action="pass", reason="no-rule-changed-body", rules=in_scope, **aud)
             return self._passthrough_resp(allow204, reshdr, body, has_body)
 
         out_body = recompress(new)
+        audit(action="rewrite-body", rules=in_scope, new_bytes=len(new), **aud)
         # Fix framing: set the new Content-Length, drop chunked Transfer-Encoding.
         new_headers = [(k, v) for (k, v) in resheaders
                        if k.lower() not in ("content-length", "transfer-encoding")]

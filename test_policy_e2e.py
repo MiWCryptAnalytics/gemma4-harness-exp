@@ -10,6 +10,7 @@ Proves, via a temp policy driven into the proxy with Sandbox(policy_file=...):
   - respmod : a fetched HTML body has the injected marker (real origin + rewrite)
   - sethdr  : the pinned User-Agent reaches an echo origin (soft; needs httpbin)
 """
+import json
 import os
 import shutil
 import subprocess
@@ -108,6 +109,14 @@ with Sandbox(network=True, exec_timeout=40, policy_file=policy_path) as sb:
     r = sb.run("curl -s https://example.org/ | grep -o GM4-INJECTED | head -1")
     check("respmod body injection", "GM4-INJECTED" in r.output, f"(got {r.output.strip()!r})")
 
+    # 3b. respmod vs. an origin asked for br/zstd — REQMOD normalizes
+    #     Accept-Encoding when the policy rewrites bodies, so a codec we can't
+    #     decode can't be used to bypass the rewrite rule.
+    r = sb.run("curl -s -H 'Accept-Encoding: zstd, br' https://example.org/ "
+               "| grep -o GM4-INJECTED | head -1")
+    check("respmod survives zstd/br request", "GM4-INJECTED" in r.output,
+          f"(got {r.output.strip()!r})")
+
     # 4. set-header — pinned UA reaches an echo origin (soft; httpbin can be down).
     r = sb.run("curl -s -m15 https://httpbin.org/headers")
     if not r.output.strip() or r.exit_code != 0:
@@ -128,6 +137,28 @@ with Sandbox(network=True, exec_timeout=40, policy_file=policy_path) as sb:
         rewritten = '"url"' in r.output and "httpbin.org/get" in r.output
         check("rewrite same-origin path", rewritten, "(/status/418 -> /get)")
         check("rewrite credential inject", "OFFLOAD-TOK" in r.output, "(Authorization echoed)")
+
+    # 6. network audit — the proxy recorded every decision, and the agent
+    #    cannot read its own record (it's in the proxy's mount namespace).
+    r = sb.run("cat /var/log/squid/audit.jsonl")
+    check("audit invisible to agent", r.exit_code != 0,
+          f"(exit {r.exit_code}: {r.output.strip()[:60]!r})")
+
+    audit_text = sb.collect_net_audit()
+    if not audit_text:
+        check("audit collected", False, "(no audit log returned)")
+    else:
+        records = [json.loads(ln) for ln in audit_text.splitlines() if ln.strip()]
+        blocks = [x for x in records
+                  if x.get("action") == "block" and "facebook" in x.get("host", "")]
+        check("audit records the block", bool(blocks),
+              f"(rule={blocks[0]['rule']!r})" if blocks else f"({len(records)} records)")
+        redirects = [x for x in records if x.get("action") == "redirect"]
+        check("audit records the redirect", bool(redirects),
+              f"(-> {redirects[0].get('location')})" if redirects else "")
+        bodies = [x for x in records if x.get("action") == "rewrite-body"]
+        check("audit records the body rewrite", bool(bodies),
+              f"(rules={bodies[0].get('rules')})" if bodies else "")
 
 os.unlink(policy_path)
 

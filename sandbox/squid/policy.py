@@ -66,7 +66,8 @@ class Decision:
     """Outcome of the request phase.
 
     `header_ops` and `rewrite` are applied to the forwarded request only when
-    action == allow.
+    action == allow. `rule` names whichever rule decided it ("default" when none
+    matched) — carried for the audit log, not used in enforcement.
     """
     action: str                              # "allow" | "block" | "redirect"
     header_ops: dict = field(default_factory=lambda: {"set": {}, "remove": []})
@@ -74,6 +75,7 @@ class Decision:
     message: str = ""
     location: str = ""
     rewrite: object = None                    # Rewrite | None
+    rule: str = ""
 
 
 def _as_list(v):
@@ -173,6 +175,15 @@ class Policy:
         self.default = str((doc or {}).get("default", "allow")).lower()
         self.rules = [Rule(r) for r in ((doc or {}).get("rules") or [])]
 
+    @property
+    def has_body_rules(self) -> bool:
+        """True if any rule adapts response bodies (rewrite-body).
+
+        The ICAP server uses this to normalize Accept-Encoding on forwarded
+        requests, so origins can't sidestep body rewriting by replying with a
+        codec we can't decode (br/zstd)."""
+        return any(r.action == "rewrite-body" for r in self.rules)
+
     # -- request phase ----------------------------------------------------
 
     def decide_request(self, req: Req) -> Decision:
@@ -190,22 +201,29 @@ class Policy:
                 # rule's headers and any accumulated from earlier set-header rules.
                 header_ops["set"].update(rule.set_headers)
                 header_ops["remove"].extend(rule.remove_headers)
-                return Decision("allow", header_ops, rewrite=rule.rewrite)
+                return Decision("allow", header_ops, rewrite=rule.rewrite,
+                                rule=rule.name)
             if rule.action == "allow":
-                return Decision("allow", header_ops)
+                return Decision("allow", header_ops, rule=rule.name)
             if rule.action == "block":
-                return Decision("block", header_ops,
-                                status=rule.status, message=rule.message)
+                return Decision("block", header_ops, status=rule.status,
+                                message=rule.message, rule=rule.name)
             if rule.action == "redirect":
                 return Decision("redirect", header_ops,
-                                location=rule.expand_location(m))
+                                location=rule.expand_location(m), rule=rule.name)
             # rewrite-body is response-phase; ignore here
         if self.default == "deny":
             return Decision("block", header_ops, status=403,
-                            message="Blocked by Gemma4 web policy (default deny).")
-        return Decision("allow", header_ops)
+                            message="Blocked by Gemma4 web policy (default deny).",
+                            rule="default")
+        return Decision("allow", header_ops, rule="default")
 
     # -- response phase ---------------------------------------------------
+
+    def matching_body_rules(self, req: Req, content_type: str):
+        """The rewrite-body rules in scope for this response (audit + apply)."""
+        return [r for r in self.rules
+                if r.action == "rewrite-body" and r.matches_response(req, content_type)]
 
     def decide_response(self, req: Req, res_headers: dict, body: bytes):
         """Return adapted body bytes, or None if nothing changed.
@@ -216,11 +234,8 @@ class Policy:
         """
         content_type = res_headers.get("content-type", "")
         subs = []
-        for rule in self.rules:
-            if rule.action != "rewrite-body":
-                continue
-            if rule.matches_response(req, content_type):
-                subs.extend(rule.body_subs)
+        for rule in self.matching_body_rules(req, content_type):
+            subs.extend(rule.body_subs)
         if not subs:
             return None
 

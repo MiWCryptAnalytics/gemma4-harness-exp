@@ -1,0 +1,1 @@
+- You can READ THE WEB: call browse(url, question) to get the readable text of a page (pass a question to focus the excerpt). Prefer it over curl/wget when you want to READ a page; use curl/wget to download files.

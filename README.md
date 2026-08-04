@@ -21,6 +21,12 @@ everything isolated in Docker.
 | 👁 Eyes | `look_at` | sees images via Gemma's own vision tower |
 | 🎨 Draw | `create_image` | composes SVG, renders it, self-scores the result |
 | 🎵 Voice | `compose_music` | writes ABC notation → synthesizes a WAV |
+| 👂 Ears | `listen` | hears a WAV as waveform + spectrogram (`--vision`) |
+| 🌐 Reading | `browse` | fetches a page as readable text (`--network`) |
+
+Ears and Reading are the loop-closers: `compose_music` → `listen` lets the agent
+judge and revise its own music, and `browse` fetches **from inside the sandbox**,
+so the web policy below governs every page it reads.
 
 ## The core idea: native tool calling
 
@@ -80,6 +86,8 @@ make demo      # the grand variety show — every tool in one run (GPU)
 make nginx     # agent downloads + compiles nginx from source
 make chart     # agent computes, plots, and SEES a chart
 make music     # agent composes ABC music → WAV
+make hear      # agent composes music, LISTENS to it, and critiques itself
+make browse    # agent reads a web page through the policy-controlled proxy
 make image     # quality-gated image agent
 make sysinfo   # agent inspects its sandbox
 
@@ -96,10 +104,49 @@ Or drive `gemma4.py` directly:
 ./venv/bin/python gemma4.py --network --exec-workspace --task "Compile nginx ..."
 ```
 
-Useful flags: `--vision` (eyes + draw), `--network`, `--exec-workspace` (run
-compiled binaries), `--exec-timeout`, `--max-steps`, `--task`/`--task-file`,
-`--system-file`/`--system-prompt-file`, `--workspace`, `--debug`, `--dry-run`,
+Useful flags: `--vision` (eyes + draw + ears), `--network` (adds `browse`),
+`--exec-workspace` (run compiled binaries), `--exec-timeout`, `--max-steps`,
+`--task`/`--task-file`, `--system-file`/`--system-prompt-file`, `--workspace`,
+`--debug`, `--stream` (live tokens on stderr), `--no-kv-reuse`, `--dry-run`,
 `--quantize {4bit,8bit}` (see below).
+
+### KV-cache reuse across steps (`--kv-reuse`, off — and here's why)
+
+An agent step re-renders the whole conversation, so the loop re-prefills every
+prior token each round. The obvious fix is to carry the KV cache between steps,
+reusing it **only when the new prompt is an exact token-for-token extension** of
+what the model has already seen (sound for every cache type; a mismatch silently
+rebuilds, so output is identical by construction rather than by hope).
+
+It is implemented, tested — and **off by default, because on Gemma 4 it never
+fires.** That is measured, not assumed:
+
+```
+$ ./venv/bin/python probe_kv_cache.py --quantize 8bit
+step 1: IDENTICAL  (2.8s uncached vs 2.4s cached)
+step 2: IDENTICAL  (4.0s uncached vs 4.0s cached)
+kv-cache: rebuild (diverged at token 388/406)
+step-2 speedup from cache reuse: 1.01x
+```
+
+The cause is a template asymmetry. Rendering a prompt with
+`add_generation_prompt=True` appends an **empty reasoning channel** —
+`<|turn>model\n<|channel>thought\n<channel|>` — but re-rendering that same
+assistant turn as *history* on the next step omits the empty block. So step N+1's
+prompt diverges ~4 tokens before the end of step N's prompt, every single step.
+
+Cropping the cache back to the common prefix isn't an escape hatch either:
+transformers refuses to crop a sliding-window cache layer once it has passed
+`sliding_window` (1024) tokens — *"otherwise some states are lost"* — and agent
+conversations cross that within a step or two.
+
+The machinery is kept because it is correct and pays off for any model whose
+template round-trips its own generated turn. Turn it on with `--kv-reuse`, bound
+it with `GEMMA_KV_BUDGET` (default 16384), and check whether it actually hits:
+
+```bash
+jq -c 'select(.event=="cache")' metrics/*_trace.jsonl
+```
 
 ### Precision vs speed (`--quantize`)
 
@@ -115,6 +162,11 @@ For speed experiments where fidelity matters less:
   fidelity loss; validate your workflow's structured outputs before relying on it.
 - `--quantize 4bit` — NF4, ~7 GB, fastest (~30 tok/s on a 3090), least faithful.
 
+> **Editing the 8-bit config?** `llm_int8_skip_modules` *replaces* transformers'
+> default skip list instead of extending it, so `lm_head` has to be named
+> explicitly. Leave it out and bitsandbytes quantizes the output head, which
+> fails on the first forward with `'Parameter' object has no attribute 'CB'`.
+
 Make targets accept the same as a variable: `QUANTIZE=4bit make demo`. Plain
 `make <target>` always runs unquantized.
 
@@ -122,8 +174,36 @@ Make targets accept the same as a variable: `QUANTIZE=4bit make demo`. Plain
 
 The agent's system rules and tasks live as editable text in
 [`prompts/`](prompts/) — `system.txt` (base rules), `system_vision.txt` (appended
-under `--vision`), `default_task.txt`, and `demo.txt` — so you can iterate on them
-without touching the code. Override per-run with `--system-file` / `--task-file`.
+under `--vision`), `system_network.txt` (appended under `--network`),
+`default_task.txt`, and `demo.txt` — so you can iterate on them without touching
+the code. Override per-run with `--system-file` / `--task-file`.
+
+### Run artifacts
+
+Every run writes a timestamped set of files to `metrics/` (gitignored):
+
+| File | What it holds |
+|------|---------------|
+| `<stamp>_<model>.json` | aggregate metrics — tokens, tok/s, tool counts, wall time |
+| `<stamp>_trace.jsonl` | **structured event trace** — one JSON object per event |
+| `<stamp>_netaudit.jsonl` | every network decision the proxy made (`--network` runs) |
+
+The trace is the machine-readable view of a run: `run_start` (full config),
+`step_start`, `generation`, `model_output` (raw, control tokens intact),
+`tool_call`, `tool_result`, `cache`, `thinking`, and a terminal `final_answer` /
+`max_steps` / `error`. Each line carries a `v` schema version.
+
+It exists so a grader can assert on *what actually happened* instead of regexing
+the console. The `[Step N] call:` / `[Step N] result:` / `[Final answer]:` stdout
+lines remain byte-identical (the companion eval suite scrapes them, and
+`test_trace.py` locks that contract), but new tooling should prefer the trace:
+
+```bash
+jq -r 'select(.event=="tool_call") | "\(.step) \(.name) \(.arguments)"' metrics/*_trace.jsonl
+```
+
+Under `--think`, the model's reasoning channel is captured into `thinking` events
+rather than being silently discarded by `clean()`.
 
 ## Architecture
 
@@ -146,10 +226,11 @@ flowchart TB
         subgraph SBX["sandbox — gemma4-sandbox:v9"]
             AGENT["tool execution · uid 1000<br/>read-only FS · cap-drop ALL · tmpfs workspace<br/>trust store = the MITM CA, nothing else"]
         end
-        subgraph PRX["proxy — gemma4-mitm:v3 (NET_ADMIN)"]
+        subgraph PRX["proxy — gemma4-mitm:v4 (NET_ADMIN)"]
             IPT["iptables<br/>nat: :80 → :3129 · :443 → :3130<br/>filter: default DROP — fail closed<br/>allow only DNS :53 + squid (uid 3128)"]
             SQUID["Squid 7.6 (from source)<br/>:3129 intercept HTTP<br/>:3130 intercept HTTPS (ssl-bump)<br/>re-signs every TLS leaf with the MITM CA"]
             ICAP["ICAP policy server 127.0.0.1:1344<br/>REQMOD: block / redirect / headers / path rewrite<br/>RESPMOD: body rewrite / redact<br/>bypass=off — ICAP down ⇒ fail closed"]
+            AUDIT["audit.jsonl<br/>every decision, in the proxy's<br/>mount ns — invisible to the agent"]
         end
     end
 
@@ -165,6 +246,8 @@ flowchart TB
     AGENT --x|"uid 1000 → :1344 REJECT<br/>(agent can't touch policy)"| ICAP
     POLICY -.->|"RO bind-mount, hot-reload"| ICAP
     CA -.->|"leaf-signing key"| SQUID
+    ICAP -.->|"appends"| AUDIT
+    AUDIT -.->|"collected at teardown →<br/>metrics/&lt;stamp&gt;_netaudit.jsonl"| LOOP
 ```
 
 The host reaches the containers only through `docker exec` — no ports are
@@ -235,7 +318,10 @@ runs inside the proxy and Squid vectors every request through it:
   uses `redirect` (the client follows the 302): an intercepted TLS connection is
   pinned to its original upstream, so an in-place host change can't reroute it.
 - **RESPMOD** — after the origin responds: **adapt the body** (regex rewrite /
-  inject / redact), content-type scoped, with gzip handled correctly.
+  inject / redact), content-type scoped, handling gzip/deflate/zstd/br. When a
+  policy contains body rules, REQMOD also **pins `Accept-Encoding`** on forwarded
+  requests to codecs the proxy can decode — otherwise an origin could sidestep a
+  redaction rule simply by answering in a compression format we can't read.
 
 Policy is a declarative, hot-reloadable YAML file (first-match-wins rules by
 host/URL/method + a `default:` of `allow` or `deny`). Pass one with `--policy-file`;
@@ -252,6 +338,25 @@ rather than leaking un-adapted traffic. The agent (which shares the proxy's netn
 is firewalled off the ICAP port by owner-uid, so it can't reach or tamper with the
 policy engine. The engine ([sandbox/squid/policy.py](sandbox/squid/policy.py)) is
 pure and host-importable, unit-tested by `test_policy.py`.
+
+### Network audit
+
+The ICAP server already sees every request and the decision made about it, so it
+records them: one JSON line per request/response into `audit.jsonl` **inside the
+proxy container**. The sandbox shares only the proxy's *network* namespace, not
+its mounts, so the agent cannot read or edit its own network record — it is
+evidence, not a log the subject can rewrite.
+
+The harness collects it at teardown into `metrics/<stamp>_netaudit.jsonl`, with
+counts summarized into the run's metrics JSON and trace:
+
+```bash
+jq -c 'select(.action=="block")' metrics/*_netaudit.jsonl
+```
+
+Each entry carries the host, path, method, decision, and **which rule decided
+it** — including the pass-through cases (`too-large`, `undecodable-encoding:...`),
+so a body that policy *didn't* rewrite is visible rather than silently unmodified.
 
 ## Instrumentation
 

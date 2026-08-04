@@ -9,14 +9,14 @@
 PY    := ./venv/bin/python
 GEMMA := $(PY) gemma4.py $(if $(QUANTIZE),--quantize $(QUANTIZE))
 IMAGE := gemma4-sandbox:v9
-PROXY := gemma4-mitm:v3
+PROXY := gemma4-mitm:v4
 CA    := sandbox/mitm/ca.crt
 SF2   := sandbox/GeneralUser-GS.sf2
 SF2_URL := https://github.com/mrbumpy409/GeneralUser-GS/raw/refs/heads/main/GeneralUser-GS.sf2
 
 .DEFAULT_GOAL := help
 
-.PHONY: help demo test dry-run sysinfo nginx chart music image metrics doctor mitm-ca mitm-verify policy-verify soundfont sandbox-build clean
+.PHONY: help demo test dry-run sysinfo nginx chart music hear browse image metrics doctor mitm-ca mitm-verify policy-verify soundfont sandbox-build clean
 
 help:  ## List available targets
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) \
@@ -25,7 +25,7 @@ help:  ## List available targets
 ## ---- the headline demo ---------------------------------------------------
 
 demo:  ## Grand variety show: every tool in one run (GPU, several minutes)
-	$(GEMMA) --vision --debug --max-steps 20 --task-file prompts/demo.txt
+	$(GEMMA) --vision --stream --debug --max-steps 20 --task-file prompts/demo.txt
 
 ## ---- individual tool showcases (GPU) -------------------------------------
 
@@ -44,6 +44,14 @@ music:  ## Agent composes ABC music and synthesizes a WAV (voice)
 	$(GEMMA) --debug --max-steps 6 \
 	  --task "Compose a short cheerful original melody in ABC notation, using multiple instruments, with a clear key and tempo and synthesize it to melody.wav with compose_music. Report the ABC."
 
+hear:  ## Agent composes music, LISTENS to it, and critiques itself (voice + ears)
+	$(GEMMA) --vision --debug --max-steps 10 \
+	  --task "Compose a short melody in ABC notation and synthesize it with compose_music to melody.wav. Then call listen on /workspace/_out.wav to hear what you actually made, and critique it honestly: does it match what you intended? Report the ABC and your critique."
+
+browse:  ## Agent reads a web page through the policy-controlled proxy (reading)
+	$(GEMMA) --debug --network --max-steps 6 \
+	  --task "Use browse to read https://example.org/ and summarize what that page is for, quoting a phrase from it."
+
 image:  ## Quality-gated image agent (picture-making + vision scoring)
 	$(PY) image_agent.py $(if $(QUANTIZE),--quantize $(QUANTIZE)) --request "Show me a picture of a lighthouse on a cliff at night."
 
@@ -52,13 +60,20 @@ image:  ## Quality-gated image agent (picture-making + vision scoring)
 test:  ## Run all no-GPU correctness tests
 	$(PY) test_parser.py
 	$(PY) test_sanitize.py
+	$(PY) test_tool_paths.py
+	$(PY) test_trace.py
+	$(PY) test_engine.py
 	$(PY) test_music.py
+	$(PY) test_webfetch.py
+	$(PY) test_listen.py
 	$(PY) test_vision_tool.py
 	$(PY) test_image_agent.py
 	$(PY) test_export.py
 	$(PY) test_ca_bundle.py
 	$(PY) test_policy.py
+	$(PY) test_netaudit.py
 	$(PY) test_policy_e2e.py
+	$(PY) test_browse_e2e.py
 
 dry-run:  ## Replay a recorded native workflow (no GPU)
 	$(GEMMA) --dry-run --workflow datawrangle

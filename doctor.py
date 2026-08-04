@@ -13,6 +13,9 @@ import shutil
 import subprocess
 import sys
 
+# Single source of truth for the image tags (bumped when the Dockerfiles change).
+from sandbox import PROXY_IMAGE_TAG
+
 MODEL_ID = os.environ.get("GEMMA_MODEL_ID", "google/gemma-4-12b-it")
 
 OK, WARN, BAD = "\033[32m✓\033[0m", "\033[33m⚠\033[0m", "\033[31m✗\033[0m"
@@ -59,7 +62,7 @@ def check_mitm():
     if not (os.path.isfile(ca_crt) and os.path.isfile(ca_key)):
         line(WARN, "mitm ca", "not generated — `make mitm-ca` (only needed for --network runs)")
         return False
-    built = subprocess.run(["docker", "image", "inspect", "gemma4-mitm:v3"],
+    built = subprocess.run(["docker", "image", "inspect", PROXY_IMAGE_TAG],
                            capture_output=True).returncode == 0
     if built:
         line(OK, "mitm proxy", "CA present, image built")
@@ -71,13 +74,13 @@ def check_mitm():
 def check_policy():
     """Warn if the ICAP policy layer isn't ready. Network-only, so never a hard
     failure. Confirms the proxy image carries a parseable baked default policy."""
-    built = subprocess.run(["docker", "image", "inspect", "gemma4-mitm:v3"],
+    built = subprocess.run(["docker", "image", "inspect", PROXY_IMAGE_TAG],
                            capture_output=True).returncode == 0
     if not built:
         line(WARN, "web policy", "proxy image not built yet (built on first --network run)")
         return False
     ok = subprocess.run(
-        ["docker", "run", "--rm", "--entrypoint", "python3", "gemma4-mitm:v3", "-c",
+        ["docker", "run", "--rm", "--entrypoint", "python3", PROXY_IMAGE_TAG, "-c",
          "import yaml; yaml.safe_load(open('/etc/squid/policy.yaml'))"],
         capture_output=True).returncode == 0
     if ok:

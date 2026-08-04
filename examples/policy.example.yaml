@@ -1,6 +1,20 @@
 # Example Gemma4 web policy. Pass with:  gemma4.py --network --policy-file examples/policy.example.yaml
 # Rules are first-match-wins; `set-header` accumulates (non-terminal), while
 # allow/block/redirect are terminal for a request. rewrite-body runs on responses.
+#
+# This governs ALL sandbox egress, including the agent's browse() tool — that
+# fetch runs inside the sandbox, so it needs no special-casing here and lands in
+# the run's network audit (metrics/<stamp>_netaudit.jsonl) like any other request.
+# To scope a task to a reading list, invert the default and allow only what it
+# needs:
+#
+#   default: deny
+#   rules:
+#     - { name: allow-docs, match: { host: ["docs.python.org", "*.readthedocs.io"] },
+#         action: allow }
+#
+# Anything else the agent tries to browse then returns your block page, which it
+# reads as an environment fact and adapts to.
 version: 1
 default: allow                 # allow | deny (deny blocks anything not explicitly allowed)
 

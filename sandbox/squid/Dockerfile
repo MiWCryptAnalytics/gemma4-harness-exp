@@ -41,9 +41,11 @@ FROM debian:12-slim
 # certs (only the *sandbox* is stripped to just our CA). libssl3/libltdl7:
 # runtime deps of the compiled Squid.
 # python3 + PyYAML (Debian pkg, no pip/build tools) run the ICAP policy server.
+# python3-zstandard/-brotli let RESPMOD decode zstd/br bodies; the server also
+# runs without them (guarded imports + Accept-Encoding normalization).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 libltdl7 iptables iproute2 ca-certificates openssl \
-        python3 python3-yaml \
+        python3 python3-yaml python3-zstandard python3-brotli \
     && rm -rf /var/lib/apt/lists/*
 
 # Dedicated low-privilege uid Squid drops to; MUST differ from the sandbox's

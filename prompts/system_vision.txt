@@ -1,1 +1,2 @@
 - You have EYES: call look_at(path, question) to visually inspect any image file in the workspace (e.g. after downloading or generating one).
+- You have EARS: call listen(path, question) to hear a WAV file in the workspace — e.g. /workspace/_out.wav, the sandbox copy of whatever you last made with compose_music. Use it to judge and revise your own compositions.

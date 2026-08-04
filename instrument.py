@@ -1,9 +1,13 @@
-"""Lightweight instrumentation: debug notes + throughput metrics.
+"""Lightweight instrumentation: debug notes, throughput metrics, run trace.
 
 Shows what the harness is doing and how fast — tokens/sec per generation, model
 load time, tool and sandbox-command timings — so runs are comparable across
 models. A concise throughput line prints per generation; verbose step/sandbox
 notes appear under --debug; an aggregate summary prints at the end of a run.
+
+Alongside the human-readable output, a run can emit a machine-readable
+trace.jsonl (init_trace/trace/close_trace) — one JSON object per event, so an
+external grader reads structured facts instead of scraping the debug prints.
 """
 
 import datetime
@@ -13,6 +17,9 @@ import re
 import time
 
 _DEBUG = False
+
+# Bump when an event's shape changes incompatibly; consumers key off it.
+TRACE_SCHEMA_VERSION = 1
 
 _DIM = "\033[90m"
 _CYAN = "\033[36m"
@@ -33,6 +40,81 @@ def debug(msg):
 def note(msg):
     """Normal-level harness note (always shown)."""
     print(f"{_DIM}  [harness] {msg}{_RST}")
+
+
+# --------------------------------------------------------------------------
+# Structured run trace (JSON Lines)
+#
+# The debug prints are a human's view and are also the eval suite's scrape
+# surface, so they must stay stable. The trace is the machine's view: append-only
+# JSON objects an external grader can assert on directly (which tools ran, with
+# what arguments, what came back) without regexing stdout.
+# --------------------------------------------------------------------------
+
+_TRACE = None       # open file handle, or None when tracing is off
+_TRACE_T0 = None
+# Raw model output can be huge; keep the trace readable but record true length.
+_TRACE_MAX_FIELD = 20000
+
+
+def run_stamp(now=None):
+    """Filename-safe timestamp for this run's artifacts (metrics, trace, audit).
+
+    Sub-second precision so two runs in the same second don't collide.
+    """
+    now = now or datetime.datetime.now()
+    return now.strftime("%Y%m%dT%H%M%S_") + f"{now.microsecond // 1000:03d}"
+
+
+def init_trace(path, **run_meta):
+    """Open a trace file and emit the run_start event. Returns the path, or None.
+
+    Tracing is off until this is called, so importing the harness (or running a
+    unit test) never writes files. Failing to open the file is not fatal — an
+    unwritable working directory should cost the run its trace, not the run.
+    """
+    global _TRACE, _TRACE_T0
+    close_trace()
+    try:
+        os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+        _TRACE = open(path, "a", buffering=1, encoding="utf-8")
+    except OSError as exc:
+        note(f"tracing disabled: could not open {path} ({exc})")
+        return None
+    _TRACE_T0 = time.perf_counter()
+    trace("run_start", schema_version=TRACE_SCHEMA_VERSION, **run_meta)
+    return path
+
+
+def trace(event, **fields):
+    """Append one event to the run trace; a no-op when tracing is off."""
+    if _TRACE is None:
+        return
+    record = {
+        "v": TRACE_SCHEMA_VERSION,
+        "ts": datetime.datetime.now().isoformat(timespec="milliseconds"),
+        "t": round(time.perf_counter() - _TRACE_T0, 3),
+        "event": event,
+    }
+    for k, v in fields.items():
+        if isinstance(v, str) and len(v) > _TRACE_MAX_FIELD:
+            record[k] = v[:_TRACE_MAX_FIELD]
+            record[f"{k}_truncated"] = True
+        else:
+            record[k] = v
+    try:
+        _TRACE.write(json.dumps(record, default=str) + "\n")
+    except Exception as exc:  # tracing must never break a run
+        debug(f"trace write failed: {exc!r}")
+
+
+def close_trace():
+    global _TRACE
+    if _TRACE is not None:
+        try:
+            _TRACE.close()
+        finally:
+            _TRACE = None
 
 
 class Timer:
@@ -58,6 +140,8 @@ class Metrics:
         tps = gen_tokens / seconds if seconds > 0 else 0.0
         self.generations.append(dict(label=label, prompt_tokens=prompt_tokens,
                                      gen_tokens=gen_tokens, seconds=seconds, tps=tps))
+        trace("generation", label=label, prompt_tokens=prompt_tokens,
+              gen_tokens=gen_tokens, seconds=round(seconds, 3), tps=round(tps, 2))
         # The headline metric — always visible, kept to one dim line.
         print(f"{_DIM}  ⚡ {label}: {gen_tokens} tok in {seconds:.1f}s = "
               f"{_CYAN}{tps:.1f} tok/s{_RST}{_DIM} (prompt {prompt_tokens} tok){_RST}")
@@ -128,18 +212,18 @@ class Metrics:
             "by_type": by,
         }
 
-    def log_run(self, model, outdir="metrics", **extra):
+    def log_run(self, model, outdir="metrics", stamp=None, **extra):
         """Write this run's metrics to a unique metrics/<timestamp>_<model>.json.
 
         One file per run (named by time + model) so results from different models
         sit side by side for comparison. Includes the per-generation detail too.
+        Pass `stamp` (from run_stamp()) to share one timestamp with the run's
+        other artifacts (trace, network audit).
         """
         os.makedirs(outdir, exist_ok=True)
         now = datetime.datetime.now()
         safe_model = re.sub(r"[^A-Za-z0-9._-]+", "-", str(model)).strip("-") or "model"
-        # Sub-second precision so two runs in the same second don't collide.
-        stamp = now.strftime("%Y%m%dT%H%M%S_") + f"{now.microsecond // 1000:03d}"
-        path = os.path.join(outdir, f"{stamp}_{safe_model}.json")
+        path = os.path.join(outdir, f"{stamp or run_stamp(now)}_{safe_model}.json")
         record = {
             "ts": now.isoformat(timespec="seconds"),
             "model": model,

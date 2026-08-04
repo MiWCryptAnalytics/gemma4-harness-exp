@@ -150,6 +150,38 @@ out = p.decide_response(req(), {"content-type": "image/png"}, body)
 assert out is None, "image body must not be rewritten"
 print("rewrite-body off-scope no-op: OK")
 
+# has_body_rules drives the ICAP server's Accept-Encoding normalization
+assert p.has_body_rules, "policy with rewrite-body must report has_body_rules"
+assert not _policy("default: allow\nrules:\n  - {name: b, match: {host: ['x.com']}, action: block}\n").has_body_rules
+print("has_body_rules: OK")
+
+# matching_body_rules names the in-scope rules (the audit log reports them)
+assert [r.name for r in p.matching_body_rules(req(), "text/html")] == ["redact"]
+assert p.matching_body_rules(req(), "image/png") == []
+print("matching_body_rules scoping: OK")
+
+# --- every decision names the rule that made it (for the network audit) ---
+p = _policy("""
+version: 1
+default: deny
+rules:
+  - name: block-fb
+    match: { host: ["*.facebook.com"] }
+    action: block
+  - name: redir-old
+    match: { url: '^https?://old\\.test/(.*)$' }
+    action: redirect
+    location: 'https://new.test/$1'
+  - name: allow-good
+    match: { host: ["good.test"] }
+    action: allow
+""")
+assert p.decide_request(req(host="www.facebook.com")).rule == "block-fb"
+assert p.decide_request(req(host="old.test", path="/x")).rule == "redir-old"
+assert p.decide_request(req(host="good.test")).rule == "allow-good"
+assert p.decide_request(req(host="unmatched.test")).rule == "default"
+print("Decision.rule attribution: OK")
+
 # undecodable body under a text/* type -> left untouched (no corruption)
 out = p.decide_response(req(), {"content-type": "text/html; charset=utf-8"}, b"\xff\xfe\xff")
 assert out is None, "undecodable body must be left untouched"
