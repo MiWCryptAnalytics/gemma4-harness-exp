@@ -1,17 +1,16 @@
-"""Host output-path containment for tools that copy artifacts out of the
-sandbox (no Docker/GPU needed).
+"""compose_music host output handling (no Docker/GPU needed).
 
-compose_music's `path` argument is model-controlled and is written on the HOST,
-so it must be confined to the working directory: traversal, absolute paths, and
-symlink escapes are rejected before any sandbox work happens.
+The tool used to take a model-controlled `path` argument that was written on
+the HOST and had to be contained to the CWD. That surface is gone: the schema
+no longer advertises a path, a stray path argument is rejected gracefully, and
+the WAV always lands at CWD/song.wav.
 """
 import os
 import tempfile
 from pathlib import Path
 
 import sandbox
-import tools
-from tools import _host_output_path, compose_music
+from tools import REGISTRY, compose_music, dispatch
 
 ABC = "K:C\nA"
 
@@ -36,45 +35,33 @@ with tempfile.TemporaryDirectory() as tmp:
     try:
         root = Path(tmp).resolve()
 
-        # 1. _host_output_path: legitimate relative paths resolve inside CWD.
-        assert _host_output_path("song.wav") == root / "song.wav"
-        assert _host_output_path("out/tunes/song.wav") == root / "out" / "tunes" / "song.wav"
-        print("relative paths -> contained in", root)
+        # 1. The model-facing schema exposes only `abc` — no host path exists
+        # for the model to traverse.
+        params = REGISTRY["compose_music"]["schema"]["function"]["parameters"]
+        assert set(params["properties"]) == {"abc"}, params
+        assert params["required"] == ["abc"], params
+        print("schema -> abc only")
 
-        # 2. Absolute and traversal paths are rejected.
-        for bad in ("/tmp/evil.wav", "../evil.wav", "a/../../evil.wav",
-                    "..", "../../etc/passwd"):
-            assert _host_output_path(bad) is None, bad
-        print("absolute + '..' paths -> rejected")
-
-        # 3. A symlink pointing outside the CWD can't be used to escape.
-        outside = Path(tempfile.mkdtemp())
-        (root / "link").symlink_to(outside)
-        assert _host_output_path("link/evil.wav") is None
-        print("symlink escape -> rejected")
-
-        # 4. compose_music refuses bad paths BEFORE touching the sandbox:
-        # with no active sandbox this must return an error, not raise.
+        # 2. A stray `path` argument (e.g. hallucinated from an old prompt)
+        # errors through dispatch before any sandbox or host write happens.
         sandbox._ACTIVE = None
-        for bad in ("../evil.wav", "/tmp/evil.wav"):
-            out = compose_music(abc=ABC, path=bad)
-            assert isinstance(out, str) and out.startswith("Error:"), out
-        assert not (Path(tmp).parent / "evil.wav").exists()
-        print("compose_music traversal -> refused with no sandbox call")
+        out = dispatch("compose_music", {"abc": ABC, "path": "/tmp/evil.wav"})
+        assert out.startswith("Error calling compose_music"), out
+        print("stray path argument -> rejected")
 
-        # 5. Happy path through a stubbed sandbox lands inside the CWD.
+        # 3. Happy path through a stubbed sandbox lands at CWD/song.wav.
         stub = StubSandbox()
         sandbox._ACTIVE = stub
         try:
-            out = compose_music(abc=ABC, path="out/song.wav")
+            out = compose_music(abc=ABC)
         finally:
             sandbox._ACTIVE = None
-        dest = root / "out" / "song.wav"
-        assert dest.read_bytes() == b"RIFFfakewav", out
+        assert (root / "song.wav").read_bytes() == b"RIFFfakewav", out
+        assert "written to host song.wav" in out, out
         assert "sandbox copy at /workspace/_out.wav" in out, out
         assert any("_synth.py" in c for c in stub.commands), stub.commands
         print("compose_music happy path ->", out)
     finally:
         os.chdir(prev_cwd)
 
-print("\nall tool path-containment tests passed")
+print("\nall compose_music output tests passed")

@@ -8,7 +8,7 @@ Act 3 - The Critic (look_at): Look at /workspace/fib.png and describe what the c
 
 Act 4 - The Painter (create_image): Create an image of "a glowing golden nautilus shell on a dark background" and report the quality score it earns.
 
-Act 5 - The Composer (compose_music): Write a short, cheerful original melody in ABC notation (choose a clear key and a tempo with Q:) and synthesize it to an audio file named song.wav.
+Act 5 - The Composer (compose_music): Write a short, cheerful original melody in ABC notation (choose a clear key and a tempo with Q:) and synthesize it to an audio file (it is saved as song.wav automatically).
 
 Act 6 - The Scribe (write_file, then read_file and list_dir): Write a file /workspace/show_notes.md summarizing what each act produced, read it back to confirm its contents, and list the files in /workspace.
 

@@ -202,25 +202,6 @@ def parse_tool_calls(text):
 # Built-in environment tools (all execute inside the sandbox container)
 # --------------------------------------------------------------------------
 
-def _host_output_path(path):
-    """Resolve a model-supplied output path strictly inside the host CWD.
-
-    Returns the resolved Path, or None if the path is absolute, contains '..',
-    or resolves (e.g. through a symlink) outside the working directory. Tools
-    that copy sandbox artifacts back to the host must gate on this — the path
-    argument is model-controlled.
-    """
-    import pathlib
-    p = pathlib.PurePosixPath(path)
-    if p.is_absolute() or ".." in p.parts:
-        return None
-    root = pathlib.Path.cwd().resolve()
-    dest = (root / path).resolve()
-    if not dest.is_relative_to(root):
-        return None
-    return dest
-
-
 @tool
 def shell(command: str):
     """Run a shell command in the sandbox and return its stdout/stderr."""
@@ -269,15 +250,9 @@ def run_python(code: str):
 
 
 @tool
-def compose_music(abc: str, path: str = "song.wav"):
+def compose_music(abc: str):
     """Synthesize music written in ABC notation into a playable WAV audio file. An optional '%%MIDI program N' line selects the General MIDI instrument (0 piano, 24 guitar, 40 violin, 73 flute)."""
     import pathlib
-    # The output path is model-controlled: contain it to the CWD before doing
-    # any work, so a traversal attempt can't write elsewhere on the host.
-    dest = _host_output_path(path)
-    if dest is None:
-        return (f"Error: output path must be a relative path inside the "
-                f"working directory (got {path!r}).")
     sandbox = get_active()
     # Ship our trusted ABC->WAV synthesizer into the sandbox and run it there on
     # the model's ABC (isolated, resource-limited), then copy the audio to host.
@@ -293,7 +268,8 @@ def compose_music(abc: str, path: str = "song.wav"):
         data = sandbox.read_bytes("/workspace/_out.wav")
     except RuntimeError as exc:
         return f"Error reading audio: {exc}"
-    dest.parent.mkdir(parents=True, exist_ok=True)
+    # Fixed host destination — the model never controls a host path.
+    dest = pathlib.Path.cwd() / "song.wav"
     dest.write_bytes(data)
-    return (f"{result.output.strip()}  ({len(data)} bytes written to host {path}; "
+    return (f"{result.output.strip()}  ({len(data)} bytes written to host song.wav; "
             f"sandbox copy at /workspace/_out.wav)")
