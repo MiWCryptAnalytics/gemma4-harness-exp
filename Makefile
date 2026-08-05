@@ -46,7 +46,7 @@ music:  ## Agent composes ABC music and synthesizes a WAV (voice)
 
 hear:  ## Agent composes music, LISTENS to it, and critiques itself (voice + ears)
 	$(GEMMA) --vision --debug --max-steps 10 \
-	  --task "Compose a short melody in ABC notation and synthesize it with compose_music to melody.wav. Then call listen on /workspace/_out.wav to hear what you actually made, and critique it honestly: does it match what you intended? Report the ABC and your critique."
+	  --task "Compose a short melody in ABC notation and synthesize it with compose_music. Then call listen on /workspace/_out.wav to hear what you actually made, and critique it honestly: does it match what you intended? Report the ABC and your critique."
 
 browse:  ## Agent reads a web page through the policy-controlled proxy (reading)
 	$(GEMMA) --debug --network --max-steps 6 \

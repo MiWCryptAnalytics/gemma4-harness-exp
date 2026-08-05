@@ -65,8 +65,14 @@ def listen(path: str, question: str = "Describe this audio: its character, rhyth
 
     prompt = (
         "This image shows an audio recording: the waveform envelope on top and a "
-        f"log-magnitude spectrogram below (measured: {measured}). Read the pitch "
-        "contour, harmonic structure, note density, rhythm and dynamics visible "
-        f"in it to answer: {question}"
+        "log-frequency spectrogram below with octave Cs marked on the axis "
+        f"(measured: {measured}). How to read instrumental audio here: one "
+        "pitched note appears as a STACK of parallel horizontal harmonic bands — "
+        "that is the normal signature of a single ordinary instrument, not "
+        "complexity or dissonance. The melody is the LOWEST bright band; follow "
+        "it against the C gridlines to get the pitch contour. In the waveform, a "
+        "sharp attack followed by a decay is the normal envelope of a piano or "
+        "plucked note, not aggression — count attacks for the rhythm. With that "
+        f"in mind, answer: {question}"
     )
     return f"{measured}\n{_ENGINE.ask_image(img, prompt)}"

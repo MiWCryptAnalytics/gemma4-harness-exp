@@ -78,14 +78,23 @@ def model_load_kwargs(quantize=None):
             # than adding to it, so lm_head must be named explicitly — quantizing
             # it makes bitsandbytes raise "'Parameter' object has no attribute
             # 'CB'" on the first forward pass.
+            # patch_dense / embedding_projection are the multimodal embedders'
+            # Linears (embed_vision / embed_audio): their forwards cast the
+            # ACTIVATIONS to weight.dtype, so with int8 weights the pixels
+            # arrive at the next LayerNorm as int8 and the vision path dies
+            # with "LayerNormKernelImpl not implemented for 'Char'".
             llm_int8_skip_modules=["lm_head", "norm", "ln_f",
-                                   "input_layernorm", "post_attention_layernorm"],
+                                   "input_layernorm", "post_attention_layernorm",
+                                   "patch_dense", "embedding_projection"],
         )
     elif quantize == "4bit":
         qc = BitsAndBytesConfig(
             load_in_4bit=True,
             bnb_4bit_quant_type="nf4",
             bnb_4bit_compute_dtype=torch.bfloat16,
+            # Same multimodal-embedder landmine as 8-bit (4-bit weights read as
+            # uint8 -> 'Byte'); the skip list applies to 4-bit despite its name.
+            llm_int8_skip_modules=["lm_head", "patch_dense", "embedding_projection"],
         )
     else:
         raise ValueError(f"quantize must be None, '4bit' or '8bit', got {quantize!r}")

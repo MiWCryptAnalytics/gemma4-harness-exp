@@ -5,7 +5,10 @@ the sandbox is where the audio lives and where numpy/matplotlib are installed.
 Produces one PNG with two stacked panels:
 
     top     waveform envelope — dynamics, phrasing, silence
-    bottom  log-magnitude spectrogram — pitch contour, harmonics, rhythm
+    bottom  log-frequency spectrogram, octave Cs gridded — pitch contour,
+            harmonics, rhythm (log axis: each octave gets equal height, so a
+            melody around C4 is readable instead of squashed under its own
+            harmonics as on a linear axis)
 
 and prints a one-line factual summary to stdout (duration, rate, channels, peak)
 so the harness can report measured facts alongside the model's impression.
@@ -17,10 +20,14 @@ import sys
 import wave
 
 MAX_SECONDS = 300.0     # bound the render for untrusted input (cf. music.py)
-FFT_SIZE = 1024
-HOP = 256
+# 4096-sample window: ~11 Hz bins, enough to separate adjacent scale notes
+# around C4 (C4->D4 is 32 Hz — the old 1024 window's 43 Hz bins merged them).
+FFT_SIZE = 4096
+HOP = 512
 MAX_DISPLAY_HZ = 8000.0
-MIN_DISPLAY_HZ = 1500.0     # never zoom in past this, so context stays visible
+MIN_DISPLAY_HZ = 1500.0     # never trim below this, so context stays visible
+LOG_MIN_HZ = 55.0           # bottom of the log axis (A1) — needs a nonzero floor
+DB_RANGE = 70.0             # clip the colormap this far below peak (hide noise floor)
 
 
 def load_wav(path, max_seconds=MAX_SECONDS):
@@ -52,11 +59,12 @@ def load_wav(path, max_seconds=MAX_SECONDS):
 
 
 def spectrogram(samples, rate, fft_size=FFT_SIZE, hop=HOP):
-    """(log-magnitude matrix [freq, time], max displayed frequency).
+    """(log-magnitude matrix [freq, time], matching frequency vector in Hz).
 
-    The frequency axis is trimmed to where the energy actually is, so a melody
-    whose fundamentals sit under 1 kHz fills the panel instead of hugging the
-    bottom of an 8 kHz plot — the contour is what the vision tower has to read.
+    The band is trimmed to where the energy actually is; the render then puts
+    it on a LOG frequency axis, because an energy trim alone can't rescue a
+    harmonic-rich instrument: piano keeps real energy to ~6 kHz, and on a
+    linear axis that squashes the melodic fundamentals into the bottom sliver.
     """
     import numpy as np
 
@@ -87,8 +95,10 @@ def spectrogram(samples, rate, fft_size=FFT_SIZE, hop=HOP):
 
     cutoff = int(np.searchsorted(freqs, limit_hz)) + 1
     cutoff = min(cutoff, len(freqs))
-    spec = spec[:cutoff]
-    return 20.0 * np.log10(spec + 1e-6), float(freqs[cutoff - 1])
+    start = int(np.searchsorted(freqs, LOG_MIN_HZ))
+    start = min(start, cutoff - 1)
+    spec = spec[start:cutoff]
+    return 20.0 * np.log10(spec + 1e-6), freqs[start:cutoff]
 
 
 def facts(samples, rate, channels, duration):
@@ -116,7 +126,7 @@ def render(wav_path, png_path):
         raise ValueError("audio file contains no samples")
     summary = facts(samples, rate, channels, duration)
 
-    spec_db, top_hz = spectrogram(samples, rate)
+    spec_db, freqs = spectrogram(samples, rate)
     shown = min(duration, len(samples) / rate)
 
     fig, (ax_wave, ax_spec) = plt.subplots(
@@ -130,9 +140,23 @@ def render(wav_path, png_path):
     ax_wave.set_title(f"{wav_path} — {summary}", fontsize=9)
     ax_wave.grid(alpha=0.25)
 
-    ax_spec.imshow(spec_db, origin="lower", aspect="auto",
-                   extent=[0, shown, 0, top_hz], cmap="magma")
-    ax_spec.set_ylabel("frequency (Hz)")
+    frame_t = (np.arange(spec_db.shape[1]) * HOP + FFT_SIZE / 2) / rate
+    vmax = float(spec_db.max())
+    ax_spec.pcolormesh(frame_t, freqs, spec_db, cmap="magma",
+                       vmin=vmax - DB_RANGE, vmax=vmax, shading="nearest")
+    ax_spec.set_yscale("log")
+    # Octave Cs as gridlines: turns the panel into a rough piano roll the
+    # vision tower can read a melody contour against.
+    c_ticks = [(f"C{octave}", 261.626 * 2.0 ** (octave - 4))
+               for octave in range(1, 9)]
+    c_ticks = [(name, f) for name, f in c_ticks if freqs[0] <= f <= freqs[-1]]
+    ax_spec.set_yticks([f for _, f in c_ticks])
+    ax_spec.set_yticklabels([f"{name} {f:.0f}Hz" for name, f in c_ticks],
+                            fontsize=8)
+    ax_spec.minorticks_off()
+    ax_spec.grid(axis="y", color="white", alpha=0.35, linewidth=0.6)
+    ax_spec.set_ylim(float(freqs[0]), float(freqs[-1]))
+    ax_spec.set_ylabel("pitch (log frequency)")
     ax_spec.set_xlabel("time (s)")
 
     fig.tight_layout()
